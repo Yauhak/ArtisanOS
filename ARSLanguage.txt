@@ -1,0 +1,28 @@
+main
+	var
+		x int 0 10;变量可以在声明的时候赋值
+		y int 0 11;[变量名][类型][数组长度，0表示普通变量][可选的初始值，可以是列表]
+		yes str "10 eq 11";字符串
+		no str "10 not eq 11"
+		resu byte 0
+	end_var;变量声明完毕
+	eq x,y;一个简单的判断，判断10是否等于11
+	jmp_t true
+	pstr no
+	:true
+		pstr yes
+	pushp_byte 30;子程序传参（立即数）
+	pushp_byte x;子程序传参（变量）
+	call my_add;调用子程序
+	push_byte resu;保存子程序运行结果（存于CalcResu）
+	pchr resu;打印
+	hlt
+
+::my_add
+	param
+		x byte 0
+		y byte 0
+	end_param
+	no_var;子程序运行过程中没有中间变量产生
+	add x,y;运算结果存入CalcResu
+	ret
