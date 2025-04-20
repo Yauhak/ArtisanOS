@@ -9,37 +9,37 @@
 */
 void draw_title(char *str, uint8_t lenStr) {
 	for (int i = 0; i < 80; i++) {
-		ARS_pc('=');
+		ARS_pc('=',0xFF);
 	}
-	ARS_pc('\n');
-	ARS_pc('|');
+	ARS_pc('\n',0xFF);
+	ARS_pc('|',0xFF);
 	for (int i = 0; i < 78; i++) {
-		ARS_pc(' ');
+		ARS_pc(' ',0xFF);
 	}
-	ARS_pc('|');
-	ARS_pc('\n');
-	ARS_pc('|');
+	ARS_pc('|',0xFF);
+	ARS_pc('\n',0xFF);
+	ARS_pc('|',0xFF);
 	for (int i = 0; i < (78 - lenStr) / 2; i++) {
-		ARS_pc(' ');
+		ARS_pc(' ',0xFF);
 	}
 	for (int i = 0; i < lenStr; i++) {
-		ARS_pc(*str++);
+		ARS_pc(*str++,0xFF);
 	}
 	for (int i = 0; i < (78 - lenStr) / 2; i++) {
-		ARS_pc(' ');
+		ARS_pc(' ',0xFF);
 	}
-	ARS_pc('|');
-	ARS_pc('\n');
-	ARS_pc('|');
+	ARS_pc('|',0xFF);
+	ARS_pc('\n',0xFF);
+	ARS_pc('|',0xFF);
 	for (int i = 0; i < 78; i++) {
-		ARS_pc(' ');
+		ARS_pc(' ',0xFF);
 	}
-	ARS_pc('|');
-	ARS_pc('\n');
+	ARS_pc('|',0xFF);
+	ARS_pc('\n',0xFF);
 	for (int i = 0; i < 80; i++) {
-		ARS_pc('=');
+		ARS_pc('=',0xFF);
 	}
-	ARS_pc('\n');
+	ARS_pc('\n',0xFF);
 }
 
 //选中效果
@@ -51,7 +51,7 @@ void mark_line(uint8_t line) {
 	//为了美观，前三个字符表示边界
 	vram += (4 + line) * VGA_WIDTH + 3;
 	uint8_t color = MAKE_COLOR(COLOR_BLACK, COLOR_WHITE);
-	for (int i = 0; i < VGA_WIDTH - 6; i++) {
+	for (int i = 0; i < VGA_WIDTH - 6; i+=2) {
 		//高八位表颜色，低八位表文字
 		*vram = color << 8 | (*vram & 0xFF);
 	}
