@@ -4,33 +4,28 @@
 //当前文本颜色
 uint8_t text_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLACK);
 //当前光标位置
-uint16_t cursor_pos=0;
-//屏幕数据缓冲区
-uint8_t ScBuff[SCREEN_BUFFSIZE];
-//屏幕缓冲区占用计数
-uint16_t ScBuffCount = 0;
+uint16_t cursor_pos = 0;
+
+//两个函数共同用于置顶窗口的显示
+//在切换窗口时可以用到
+void DispBuff(const char *dest, uint16_t count, uint8_t id) {
+	for (uint16_t i = 0; i < count; i++) {
+		ARS_pc(dest[i], id);
+	}
+}
+
+void ToppingWindowById(uint8_t id) {
+	DispBuff(EXE_SCBUFF[id], EXE_SC_POS[id], id);
+}
 
 volatile void *ARS_memmove(volatile void *dest, volatile const void *src, int n) {
-	if (dest == 0 || src == 0 || n == 0) {
-		return dest; // 处理无效参数
-	}
+	if (dest == (void*)0 || src == (void*)0 || n <= 0) return dest;
 	volatile char *d = (volatile char *)dest;
 	volatile const char *s = (volatile const char *)src;
-	// 判断内存重叠方向：
-	// - 如果目标在源的前面（dest < src），从前往后复制
-	// - 如果目标在源的后面（dest > src），从后往前复制
 	if (d < s) {
-		// 从前往后逐字节复制
-		for (int i = 0; i < n; i++) {
-			d[i] = s[i];
-			if(n>=ARS_strlen(s))d[i]=0;
-		}
+		for (int i = 0; i < n; i++) d[i] = s[i];
 	} else {
-		// 从后往前逐字节复制
-		for (int i = n; i > 0; i--) {
-			d[i - 1] = s[i - 1];
-			if(n>=ARS_strlen(s))d[i]=0;
-		}
+		for (int i = n - 1; i >= 0; i--) d[i] = s[i];
 	}
 	return dest;
 }
@@ -67,11 +62,11 @@ uint8_t ARS_strcmp(const char *haystack, const char *needle, int len) {
 	return 0;
 }
 
-char *ARS_strtok(char *str,const char delim){
-	char *ptr=str;
-	while(*ptr!=delim&&ptr<str+ARS_strlen(str))ptr++;
-	if(*ptr==delim){
-		*ptr=0;
+char *ARS_strtok(char *str, const char delim) {
+	char *ptr = str;
+	while (*ptr != delim && ptr < str + ARS_strlen(str))ptr++;
+	if (*ptr == delim) {
+		*ptr = 0;
 	}
 	return str;
 }
@@ -95,37 +90,53 @@ static inline char ARS_inw(uint16_t port) {
 
 //输出一个字符
 //可以处理换行和退格情况
-void ARS_pc(char c) {
-	volatile uint16_t* vram = (volatile uint16_t*)0xB8000;
+//还有光标处理
+void ARS_pc(char c, uint8_t id) {
+	volatile uint16_t* vram;
+	//一般程序窗口
+	if (id >= 0 && id < OS_MAX_TASK) {
+		vram = (volatile uint16_t*)(VGA_START + VGA_WIDTH * 5);
+		//标题栏
+	} else if (id = 0xFF) {
+		vram = (volatile uint16_t*)VGA_START;
+	}
+	//若为换行符
 	if (c == '\n') {
 		cursor_pos = (cursor_pos / VGA_WIDTH + 1) * VGA_WIDTH;
 		//退格键
+		//这部分其实用来处理键盘的BackSpace
 	} else if (c == 8) {
 		vram[cursor_pos--] = 0;
-		ScBuff[ScBuffCount--] = 0;
+		EXE_SCBUFF[id][EXE_SC_POS[id]--] = 0;
 	} else {
 		vram[cursor_pos++] = (text_color << 8) | c;
 	}
 	//屏幕滚动处理
-	if (cursor_pos >= VGA_HEIGHT * VGA_WIDTH) {
-		ARS_memmove(vram, vram + VGA_WIDTH, (VGA_HEIGHT - 1)*VGA_WIDTH);
+	//（程序窗口）
+	if (cursor_pos >= VGA_HEIGHT * VGA_WIDTH && id >= 0 && id < OS_MAX_TASK) {
+		ARS_memmove(vram, vram + VGA_WIDTH, (VGA_HEIGHT - 5)*VGA_WIDTH);
 		cursor_pos -= VGA_WIDTH;
 	}
-	if (ScBuffCount < SCREEN_BUFFSIZE) {
+	if (EXE_SC_POS[id] < SCREEN_BUFFSIZE) {
 		//屏幕缓冲区缓存处理
-		ScBuff[ScBuffCount++]=c;
+		if (c != 8)EXE_SCBUFF[id][EXE_SC_POS[id]++] = c;
 	} else {
-		ARS_memmove(ScBuff, ScBuff + 1, SCREEN_BUFFSIZE - 1);
-		ScBuff[SCREEN_BUFFSIZE - 1] = c;
+		ARS_memmove(EXE_SCBUFF[id], EXE_SCBUFF[id] + 1, SCREEN_BUFFSIZE - 1);
+		if (c != 8)EXE_SCBUFF[id][SCREEN_BUFFSIZE - 1] = c;
 	}
+	//光标位置更新
+	ARS_outb(0x3D4, 0x0F);
+	ARS_outb(0x3D5, cursor_pos & 0xFF);
+	ARS_outb(0x3D4, 0x0E);
+	ARS_outb(0x3D5, (cursor_pos >> 8) & 0xFF);
 }
 
 // PS/2键盘驱动
-char ARS_gc() {
+char ARS_gc(uint8_t id) {
 	if (ARS_inb(0x64) & 0x1) {
 		char chr = ARS_inb(0x60);
 		//有回显地接收键盘输入
-		ARS_pc(chr);
+		ARS_pc(chr, id);
 		return chr;
 	} else return -1;
 }
