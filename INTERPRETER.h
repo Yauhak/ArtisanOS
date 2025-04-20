@@ -10,10 +10,15 @@
 	#define BAD_MEM_TRACE 4
 	#define DIV_BY_0 5
 	#define OUT_PARAM_BOUND 6
+	#define INVALID_LEN 7
+	#define NEED_APPEND_TO_TAIL 8
+	#define MEM_CLEAN_PARTLY 9
+	#define NO_FREE_MEM 10
 
 	#define SPLIT "SPLT" //魔术字：已被程序占位
 	#define FREE "FREE" //魔术字：程序内存已被清空
-
+	#define CHECK 1145141919
+	#define RESERVED_BLOCKSIZE 3
 #endif
 
 struct ParamStack {
@@ -29,10 +34,16 @@ typedef struct ParamStack ParamStack;
 
 struct Magic {
 	char MagicHead[4];
+	int32_t Reserved;//保留字
+	//用于应对内存越界访问的缓冲
 	uint8_t id;
-	int len;
-	int last_block;
-	int next_block;
+	int32_t Check;
+	//Check为守卫标识
+	//最后的内存防线
+	//若连此值都被破坏则认为该段内存完全损坏
+	uint32_t len;
+	volatile uint8_t *last_block;
+	volatile uint8_t *next_block;
 	//注意
 	//此处的作用域等级只是方便虚拟机追踪内存分配情况
 	//“应用程序”的字节码中若没有限制则可以访问全局内存
@@ -96,8 +107,9 @@ int findIntWithAddr();
 void setByte(int8_t byteText);
 void setDByte(int16_t DbyteText);
 void setInt(int32_t intText) ;
-int8_t ReArrangeMemAndTask(uint8_t id);
+int8_t ReArrangeMemAndTask(uint8_t id,uint8_t isForce);
 int8_t DelLastFuncMem(uint8_t id);
+int8_t SuperFree(Magic *block);
 int findFreeMemById(uint8_t id, int allocLen, int level);
 uint8_t FindPhyMemOffByID(uint8_t id, uint32_t offset);
 void init_mem_info();
