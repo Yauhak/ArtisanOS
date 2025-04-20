@@ -8,6 +8,7 @@
 	#define uint16_t unsigned short
 	#define uint32_t unsigned int
 
+	#define VGA_START 0xB8000
 	#define VGA_WIDTH 80
 	#define VGA_HEIGHT 25
 
@@ -37,7 +38,14 @@
 	static inline void ARS_outb(uint16_t port, uint8_t val);
 	static inline char ARS_inb(uint16_t port);
 	static inline char ARS_inw(uint16_t port);
-	void ARS_pc(char c);
-	char ARS_gc();
+	void ARS_pc(char c,uint8_t id);
+	char ARS_gc(uint8_t id);
+	void DispBuff(const char *dest,uint16_t count,uint8_t id);
+	void ToppingWindowById(uint8_t id);
 
+	//屏幕数据缓冲区
+	uint8_t EXE_SCBUFF[OS_MAX_TASK][SCREEN_BUFFSIZE];
+	//屏幕缓冲区占用计数
+	uint16_t EXE_SC_POS[OS_MAX_TASK] = {0};
+	volatile uint32_t ID=0;
 #endif
