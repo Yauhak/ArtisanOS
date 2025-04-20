@@ -97,7 +97,7 @@ void ARS_pc(char c, uint8_t id) {
 	if (id >= 0 && id < OS_MAX_TASK) {
 		vram = (volatile uint16_t*)(VGA_START + VGA_WIDTH * 5);
 		//标题栏
-	} else if (id = 0xFF) {
+	} else if (id == 0xFF) {
 		vram = (volatile uint16_t*)VGA_START;
 	}
 	//若为换行符
