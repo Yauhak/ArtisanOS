@@ -21,6 +21,12 @@
 	#define COLOR_YELLOW  0x6
 	#define COLOR_WHITE   0x7
 
+	#define KEY_UP 0x80
+	#define KEY_DOWN 0x81
+	#define KEY_LEFT 0x82
+	#define KEY_RIGHT 0x83
+	#define NOT_EXT_KEY 0x85
+
 	#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 	#define SCREEN_BUFFSIZE 4096
 	#define OS_MAX_TASK 64//最大可“多进程”执行64个程序
@@ -38,14 +44,17 @@
 	static inline void ARS_outb(uint16_t port, uint8_t val);
 	static inline char ARS_inb(uint16_t port);
 	static inline char ARS_inw(uint16_t port);
-	void ARS_pc(char c,uint8_t id);
+	void ARS_pc(uint8_t c,uint8_t id);
 	char ARS_gc(uint8_t id);
 	void DispBuff(const char *dest,uint16_t count,uint8_t id);
 	void ToppingWindowById(uint8_t id);
+	static void _int_to_str(int32_t num, char *buffer);
+	static void _float_to_str(float num, char *buffer, int precision);
 
 	//屏幕数据缓冲区
 	uint8_t EXE_SCBUFF[OS_MAX_TASK][SCREEN_BUFFSIZE];
 	//屏幕缓冲区占用计数
 	uint16_t EXE_SC_POS[OS_MAX_TASK] = {0};
 	volatile uint32_t ID=0;
+	uint8_t TopWindowId;
 #endif
