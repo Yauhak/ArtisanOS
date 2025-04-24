@@ -1,15 +1,11 @@
 #include "INTERPRETER.h"
-#define EXP EXE_SC_POS[taskId]<SCREEN_BUFFSIZE?EXE_SC_POS[taskId]++:SCREEN_BUFFSIZE-1
-#define CASE if(EXE_SC_POS[taskId]>=SCREEN_BUFFSIZE)\
-				ARS_memmove(EXE_SCBUFF[taskId],&EXE_SCBUFF[taskId][1],SCREEN_BUFFSIZE-1);
 
 volatile uint8_t *CurCmd[OS_MAX_TASK];//每个程序当前执行的命令的位置，0表示未启用
 //为每个程序都分配的窗口缓冲区
 extern uint8_t EXE_SCBUFF[OS_MAX_TASK][SCREEN_BUFFSIZE];
 extern uint16_t EXE_SC_POS[OS_MAX_TASK];
-extern volatile uint32_t ID;
 //置顶窗口的ID
-uint8_t TopWindowId;
+extern uint8_t TopWindowId;
 ParamStack Stack[OS_MAX_PARAM];//子程序参数栈
 uint8_t IndexOfSPS = 0; //子程序参数栈压入了几个参数
 //上述两个变量共同用于子程序调用完毕后跳转返回的内存和命令
@@ -31,36 +27,6 @@ volatile uint8_t *CurPhyMem[OS_MAX_TASK]; //“安全”的起始物理内存
 //在“编译”成ARS字节码时，该段程序占用的内存信息会被提取出来
 //然后在调用时基于此进行内存分配
 
-//16位类型高8位
-int8_t HigherInt16(int16_t x) {
-	return (int8_t)(x >> 8);
-}
-
-//16低8位
-int8_t LowerInt16(int16_t x) {
-	return (int8_t)((x << 8) >> 8);
-}
-
-//32高16位
-int16_t HigherInt32(int x) {
-	return (int16_t)(x >> 16);
-}
-
-//32低16位
-int16_t LowerInt32(int x) {
-	return (int16_t)((x << 16) >> 16);
-}
-
-//合并 双字节
-int16_t Tran8To16(int8_t higher, int8_t lower) {
-	return ((int16_t)higher << 8) | lower;
-}
-
-//合并 四字节
-int Tran16To32(int16_t higher, int16_t lower) {
-	return ((int)higher << 16) | lower;
-}
-
 //修复意外越界的内存
 //如果意外越界连魔术字头都修改了，那我们认为是意外
 //但如果魔术字没变，其他字段却变动了
@@ -73,6 +39,7 @@ int8_t ResumeMem(Magic *M, uint8_t id) {
 		M->MagicHead[2] = 'L';
 		M->MagicHead[3] = 'T';
 		M->id = id;
+		return 0;
 	} else {
 		//最后的守卫字符都修改了
 		//救不了了
@@ -96,14 +63,30 @@ int8_t SuperFree(Magic *block) {
 	if (!ptr) {
 		return NO_FREE_MEM;
 	}
+	//从FreeHead头开始就出错了
+	//空闲表视为完全没救了
+	if (ARS_strcmp(ptr->MagicHead, FREE, 4) && ptr->Check != CHECK) {
+		return BAD_FREE_BLOCK | NO_FREE_MEM;
+	}
 	Magic *img = 0;
 	//从头开始搜索空闲内存
 	//img相当于ptr上一步的地址的快照
 	//因为要考虑前后合并的情况
-	while (ptr->next_block) {
+	while (ptr) {
+		//中途出错
+		//终止继续合并
+		//并且缩小空闲内存范围
+		//防止污染
+		//哪怕魔术字出错，只要守卫字没错，照样回收内存
+		if (ARS_strcmp(ptr->MagicHead, FREE, 4)) {
+			if (ptr->Check != CHECK) {
+				FreeTail = ptr;
+				return BAD_FREE_BLOCK;
+			}
+		}
 		//空闲内存链表记录的内存块之一恰好在block前，向前合并
 		//RESERVED_BLOCKSIZE表示预留缓冲区大小,三字节
-		if (!ARS_strcmp(ptr->MagicHead, FREE, 4) && ptr + ptr->len + sizeof(Magic) + RESERVED_BLOCKSIZE == block) {
+		if (((uint8_t *)ptr) + ptr->len + sizeof(Magic) + RESERVED_BLOCKSIZE == (uint8_t *)block) {
 			//只更新内存块数据区长度
 			//把block包括魔术字头的部分全部吞入
 			ptr->len += sizeof(Magic) + block->len;
@@ -117,7 +100,7 @@ int8_t SuperFree(Magic *block) {
 			status = 1;
 		}
 		//空闲内存链表记录的内存块在后，向后合并
-		if (!ARS_strcmp(ptr->MagicHead, FREE, 4) && block + block->len + sizeof(Magic) + RESERVED_BLOCKSIZE == ptr) {
+		if (((uint8_t *)block) + block->len + sizeof(Magic) + RESERVED_BLOCKSIZE == (uint8_t *)ptr) {
 			//首先抄一下空闲内存链表记录的信息
 			//因为包含了下文
 			ARS_memmove((uint8_t *)block, (uint8_t *)ptr, sizeof(Magic));
@@ -137,12 +120,18 @@ int8_t SuperFree(Magic *block) {
 			//可以直接返回结果
 			//不需要一直访问到链表末尾
 			status = 2;
+			// 在向后合并后检查是否为FreeTail
+			if (ptr == FreeTail) {
+				FreeTail = block; // 更新FreeTail为新合并的块
+			}
+			ptr = block; //更新ptr
 		}
 		if (status == 2) {
 			return 0;
 		}
 		img = ptr;
 		if (ptr->next_block)ptr = (Magic *)ptr->next_block;
+		else break;
 	}
 	//如果找不到可以合并的，提示将该块内存追加到FreeTail
 	if (!status)return NEED_APPEND_TO_TAIL;
@@ -151,16 +140,17 @@ int8_t SuperFree(Magic *block) {
 //该函数用在“应用程序”结束后启动
 //用来销毁该应用所有的内存
 //当整个程序退出时发挥作用
-//isForce表示强制销毁内存
-//此时内存块数据可能受到严重损坏
-int8_t ReArrangeMemAndTask(uint8_t id, uint8_t isForce) {
+int8_t ReArrangeMemAndTask(uint8_t id) {
 	//从头开始
 	Magic *M = (Magic *)MemHead[id];
+	if (!M) {
+		return NO_MEM_HEAD;
+	}
 	while (M < (Magic *)(OS_PHY_MEM_START + OS_MAX_MEM)) {
 		//发现魔术字
-		if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4) || isForce) {
+		if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4)) {
 			//id对应上了
-			if (M->id == id || isForce) {
+			if (M->id == id) {
 				//魔术字声明：该块内存被释放
 				M->MagicHead[0] = 'F';
 				M->MagicHead[1] = 'R';
@@ -169,18 +159,6 @@ int8_t ReArrangeMemAndTask(uint8_t id, uint8_t isForce) {
 				//去除魔术字后该块内存的长度
 				//加上缓冲字节
 				int size = M->len + RESERVED_BLOCKSIZE;
-				//如果在强制销毁模式下发现魔术字被破坏的内存
-				//并且连守卫文字也被损坏
-				//为保护其他内存
-				//终止内存的继续销毁
-				if (ARS_strcmp((const char*) M->MagicHead, SPLIT, 4) && isForce) {
-					if (M->Check != CHECK) {
-						//提示进程结束
-						//此时仍有部分内存无法释放
-						CurCmd[id] = 0;
-						return MEM_CLEAN_PARTLY;
-					}
-				}
 				volatile uint8_t *next = M->next_block;
 				//跳过Magic头注销内存
 				volatile uint8_t *PhyMem = (uint8_t *)(M + sizeof(Magic));
@@ -215,7 +193,11 @@ int8_t ReArrangeMemAndTask(uint8_t id, uint8_t isForce) {
 			//该段内存ID匹配出错
 			return ID_ERR;
 		}
-		//在非强制模式下该段内存魔术字匹配出错
+		//内存魔术字匹配出错
+		//并且无法修复魔术字头
+		//此时关于内存上下文的链表可能被破坏
+		//为了不破坏其他程序的内存
+		//只好终止内存释放
 		else {
 			int8_t Repair = ResumeMem(M, id);
 			if (Repair == HEAD_ERR) {
@@ -233,12 +215,14 @@ int8_t ReArrangeMemAndTask(uint8_t id, uint8_t isForce) {
 //销毁某个应用程序最末一个子程序占用的内存
 int8_t DelLastFuncMem(uint8_t id) {
 	//从尾部开始
-	Magic *P = (Magic *)MemTail[id];
 	//获取调用该子程序的代码块此前运行到的内存地址和命令地址
 	//起到上下文的作用
 	volatile uint8_t * LastFuncMem = 0;
 	volatile uint8_t * LastFuncCmd = 0;
 	Magic *M = (Magic *)MemTail[id];
+	if (!M) {
+		return NO_MEM_TAIL;
+	}
 	//如果当前内存不是主程序占用内存
 	//则将最末一个子程序的占用内存与其前面的内存断联
 	if (M->next_block && M->last_block && MemLevel[id] > 0) {
@@ -293,14 +277,14 @@ int8_t DelLastFuncMem(uint8_t id) {
 					}
 				} else {
 					//此时便是主程序
-					ReArrangeMemAndTask(id, 0);
+					ReArrangeMemAndTask(id);
 					return 0;
 				}
 			}
 			return ID_ERR;
 		} else {
 			int8_t Repair = ResumeMem(M, id);
-			if (Repair == HEAD_ERR)return HEAD_ERR;
+			if (Repair == HEAD_ERR)return MEM_CLEAN_PARTLY;
 		}
 	}
 	return OUT_BOUND;
@@ -315,6 +299,9 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 	//如果当前命令指针指向不为0（即该进程已启用）则指向当前程序的末尾内存地址
 	Magic *M;
 	if (CurCmd[id])M = (Magic *)MemTail[id];
+	if (!M) {
+		return NO_MEM_TAIL;
+	}
 	//从头查找空闲内存
 	uint8_t *M2 = (uint8_t *)FreeHead;
 	uint8_t isalloc = 0;
@@ -350,7 +337,8 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 					remaining->MagicHead[1] = 'R';
 					remaining->MagicHead[2] = 'E';
 					remaining->MagicHead[3] = 'E';
-					remaining->len = ((Magic*)M2)->len - TTL;
+					remaining->len = ((Magic*)M2)->len - TTL - RESERVED_BLOCKSIZE;
+					remaining->Check = CHECK;
 					if (FreeHead == 0) {
 						FreeHead = (volatile uint8_t *)remaining;
 						FreeTail = (Magic *)FreeHead;
@@ -455,6 +443,9 @@ uint8_t FindPhyMemOffByID(uint8_t id, uint32_t offset) {
 	int VAddr = 0;
 	//除了公有变量，活跃的变量一定是最近启动的子程序的变量
 	Magic *M = (Magic *)MemTail[id];
+	if (!M) {
+		return NO_MEM_TAIL;
+	}
 	while (M < (Magic *)(OS_PHY_MEM_START + OS_MAX_MEM)) {
 		//发现魔术字
 		if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4)) {
@@ -485,54 +476,75 @@ uint8_t FindPhyMemOffByID(uint8_t id, uint32_t offset) {
 	return OUT_BOUND;
 }
 
-void ReadByteMem(uint8_t *Recv) {
-	*Recv = *CurPhyMem[ID];
+void ReadByteMem(uint8_t *Recv, uint8_t id) {
+	*Recv = *CurPhyMem[id];
 }
 
 //访问 单字节
 //访问完后自动跳过该段内存
 //下方的访问双字节和四字节也是如此
-int8_t findByteWithAddr() {
+int8_t findByteWithAddr(uint8_t id) {
 	int8_t Byte_Buff;
-	ReadByteMem(&Byte_Buff);
-	CurPhyMem[ID]++;
+	ReadByteMem(&Byte_Buff, id);
+	CurPhyMem[id]++;
 	return Byte_Buff;
 }
 
 //访问 双字节
-int16_t findDByteWithWithAddr() {
+int16_t findDByteWithWithAddr(uint8_t id) {
 	int16_t value;
-	value = *((int16_t *)CurPhyMem[ID]);
-	CurPhyMem[ID] += 2;
+	value = *((int16_t *)CurPhyMem[id]);
+	CurPhyMem[id] += 2;
 	return value;
 }
 
 //访问 四字节
-int32_t findIntWithAddr() {
+int32_t findIntWithAddr(uint8_t id) {
 	int32_t value;
-	value = *((int32_t *)CurPhyMem[ID]);
-	CurPhyMem[ID] += 4;
+	value = *((int32_t *)CurPhyMem[id]);
+	CurPhyMem[id] += 4;
+	return value;
+}
+
+//访问 Float
+float findFloatWithAddr(uint8_t id) {
+	float value;
+	value = *((float *)CurPhyMem[id]);
+	CurPhyMem[id] += 4;
 	return value;
 }
 
 //设置 单字节
 //对于多字节类型则拆分成单个字节依次存放
-void setByte(int8_t byteText) {
-	*CurPhyMem[ID]++ = byteText;
+void setByte(int8_t byteText, uint8_t id) {
+	*CurPhyMem[id]++ = byteText;
 }
 
-void setDByte(int16_t DbyteText) {
-	int8_t H = HigherInt16(DbyteText);
-	int8_t L = LowerInt16(DbyteText);
-	*CurPhyMem[ID]++ = H;
-	*CurPhyMem[ID]++ = L;
+void setDByte(int16_t DbyteText, uint8_t id) {
+	ARS_memmove(CurPhyMem[id], &DbyteText, sizeof(int16_t));
+	CurPhyMem[id] += sizeof(int16_t);
 }
 
-void setInt(int32_t intText) {
-	int16_t H = HigherInt32(intText);
-	int16_t L = LowerInt32(intText);
-	setDByte(H);
-	setDByte(L);
+void setInt(int32_t intText, uint8_t id) {
+	ARS_memmove(CurPhyMem[id], &intText, sizeof(int32_t));
+	CurPhyMem[id] += sizeof(int32_t);
+}
+
+void setFloat(float fText, uint8_t id) {
+	ARS_memmove(CurPhyMem[id], &fText, sizeof(float));
+	CurPhyMem[id] += sizeof(float);
+}
+
+float tranIntToFloat(int x) {
+	float result;
+	ARS_memmove(&result, &x, sizeof(int));  // 使用 memcpy 安全转换
+	return result;
+}
+
+int tranFloatToInt(float x) {
+	int result;
+	ARS_memmove(&result, &x, sizeof(float));  // 使用 memcpy 安全转换
+	return result;
 }
 
 void init_mem_info() {
@@ -545,6 +557,9 @@ void init_mem_info() {
 	}
 }
 
+//注意！！
+//params并不代表它一定表示的是int类型
+//可能由float类型变换而来
 int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 	// 前五个字节代表命令
 	uint8_t cmd = cmdAndPmTp >> 3;
@@ -555,14 +570,9 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 		case PCHR:
 			//若为立即数
 			if (ParamType == 0) {
-				CASE
-				EXE_SCBUFF[taskId][EXP] = (char)params[0];
-				if (TopWindowId == taskId)ARS_pc((char)params[0], taskId);
+				ARS_pc((char)params[0], taskId);
 			} else {
-				CASE
-				FindPhyMemOffByID(taskId, params[0]);
-				EXE_SCBUFF[taskId][EXP] = *CurPhyMem[taskId];
-				if (TopWindowId == taskId)ARS_pc(*CurPhyMem[taskId], taskId);
+				ARS_pc(*CurPhyMem[taskId], taskId);
 			}
 			break;
 		//输出字符串
@@ -570,51 +580,212 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			//该函数只能以地址作为参数
 			FindPhyMemOffByID(taskId, params[0]);
 			while (*CurPhyMem[taskId]++) {
-				CASE
-				EXE_SCBUFF[taskId][EXP] = *CurPhyMem[taskId];
-				if (TopWindowId == taskId)ARS_pc(*CurPhyMem[taskId], taskId);
+				ARS_pc(*CurPhyMem[taskId], taskId);
 			}
 			break;
+		case PVAL: {
+			// 参数解析
+			uint8_t data_type = params[0];  // 0=DWORD, 1=INT, 2=FLOAT
+			int32_t value;
+			float f_value;
+			// 根据 ParamType 获取数值
+			if (ParamType == 0) {  // 立即数
+				value = params[1];
+				if (data_type == 2) {  // FLOAT 需要特殊处理
+					ARS_memmove(&f_value, &value, sizeof(float));
+				}
+			} else {  // 地址
+				FindPhyMemOffByID(taskId, params[1]);
+				switch (data_type) {
+					case 0:  // DWORD
+						value = (int32_t)findDByteWithAddr(taskId);
+						break;
+					case 1:  // INT
+						value = findIntWithAddr(taskId);
+						break;
+					case 2:  // FLOAT
+						f_value = findFloatWithAddr(taskId);
+						break;
+				}
+			}
+			// 转换为字符串并输出
+			char buffer[32];
+			switch (data_type) {
+				case 0:  // DWORD (16-bit)
+					_int_to_str((int16_t)value, buffer);
+					break;
+				case 1:  // INT (32-bit)
+					_int_to_str(value, buffer);
+					break;
+				case 2:  // FLOAT
+					_float_to_str(f_value, buffer, 4);  // 默认保留4位小数
+					break;
+			}
+			// 逐字符输出
+			for (int i = 0; buffer[i] != '\0'; i++)
+				ARS_pc(buffer[i], taskId);
+			break;
+		}
 		//接收一个字符的输入
 		//该函数只能以地址作为参数
 		case KEYINPUT:
 			FindPhyMemOffByID(taskId, params[0]);
 			*CurPhyMem[taskId] = ARS_gc(taskId);
 			break;
+		//输入数值
+		//DWORD，INT或FLOAT
+		case VALINPUT: {
+			// 定义错误码
+#define INVALID_INPUT  -10
+#define OVERFLOW_ERR   -11
+#define INVALID_TYPE   -12
+			// 定位目标内存地址
+			int8_t ret = FindPhyMemOffByID(taskId, params[0]);
+			if (ret != 0) return ret; // 地址无效直接返回
+			char inputBuf[128] = {0}; // 输入缓冲区初始化
+			uint8_t current_char = 0;
+			uint8_t buf_index = 0;
+			uint8_t is_negative = 0;
+			uint8_t has_decimal = 0;
+			float decimal_factor = 0.1f;
+			double val = 0.0;
+			// 读取输入直到换行或缓冲区满
+			while (current_char != '\n' && buf_index < sizeof(inputBuf) - 1) {
+				current_char = ARS_gc(taskId);
+				// 退格处理
+				if (current_char == 8) {
+					if (buf_index > 0) {
+						buf_index--;
+						inputBuf[buf_index] = '\0';
+					}
+					continue;
+				}
+				// 回车结束输入
+				if (current_char == '\n') {
+					inputBuf[buf_index] = '\0';
+					break;
+				}
+				// 过滤非法字符（仅允许数字、负号、小数点）
+				if ((current_char < '0' || current_char > '9') &&
+				    current_char != '-' &&
+				    current_char != '.') {
+					continue; // 忽略非法字符
+				}
+				// 负号只能在首位
+				if (current_char == '-' && buf_index != 0) {
+					continue; // 忽略中间负号
+				}
+				// 小数点不能重复
+				if (current_char == '.' && has_decimal) {
+					continue; // 忽略重复小数点
+				}
+				// 存储字符并回显
+				inputBuf[buf_index++] = current_char;
+				inputBuf[buf_index] = '\0';
+				if (TopWindowId == taskId) {
+					ARS_pc(current_char, taskId);
+				}
+				// 标记负号或小数点
+				if (current_char == '-') is_negative = 1;
+				if (current_char == '.') has_decimal = 1;
+			}
+			// 解析数值
+			char *ptr = inputBuf;
+			if (*ptr == '-') {
+				is_negative = 1;
+				ptr++;
+			}
+			while (*ptr != '\0') {
+				if (*ptr == '.') {
+					has_decimal = 1;
+					ptr++;
+					continue;
+				}
+				if (*ptr >= '0' && *ptr <= '9') {
+					if (!has_decimal) {
+						val = val * 10 + (*ptr - '0');
+					} else {
+						val += (*ptr - '0') * decimal_factor;
+						decimal_factor *= 0.1f;
+					}
+				} else { // 遇到非数字字符终止解析
+					break;
+				}
+				ptr++;
+			}
+			// 应用负号
+			if (is_negative) val = -val;
+			// 类型转换与存储
+			switch (ParamType) {
+				case 0: { // DWORD (int16_t)
+					if (val > 32767 || val < -32768) {
+						return OVERFLOW_ERR;
+					}
+					setDByte((int16_t)val, taskId);
+					break;
+				}
+				case 1: { // INT (int32_t)
+					if (val > 2147483647 || val < -2147483648) {
+						return OVERFLOW_ERR;
+					}
+					setInt((int32_t)val, taskId);
+					break;
+				}
+				case 2: { // FLOAT
+					setFloat((float)val, taskId);
+					break;
+				}
+				default:
+					return INVALID_TYPE;
+			}
+			break;
+		}
 		// 将参数2（立即数或地址，大小为一个字节）存入参数1表示的地址内存
 		case MOV_BYTE:
 			if (ParamType == 0) {
 				FindPhyMemOffByID(taskId, params[0]);
-				setByte((int8_t)params[1]);
+				setByte((int8_t)params[1], taskId);
 			} else {
 				FindPhyMemOffByID(taskId, params[1]);
 				int8_t x = *(volatile int8_t*)CurPhyMem[taskId];
 				FindPhyMemOffByID(taskId, params[0]);
-				setByte(x);
+				setByte(x, taskId);
 			}
 			break;
 		// 将参数2（立即数或地址，大小为二个字节）存入参数1表示的地址内存
 		case MOV_DWRD:
 			if (ParamType == 0) {
 				FindPhyMemOffByID(taskId, params[0]);
-				setDByte((int16_t)params[1]);
+				setDByte((int16_t)params[1], taskId);
 			} else {
 				FindPhyMemOffByID(taskId, params[1]);
 				int16_t x = *(volatile int16_t*)CurPhyMem[taskId];
 				FindPhyMemOffByID(taskId, params[0]);
-				setDByte(x);
+				setDByte(x, taskId);
 			}
 			break;
 		// 将参数2（立即数或地址，大小为四个字节）存入参数1表示的地址内存
 		case MOV_INT:
 			if (ParamType == 0) {
 				FindPhyMemOffByID(taskId, params[0]);
-				setInt((int32_t)params[1]);
+				setInt((int32_t)params[1], taskId);
 			} else {
 				FindPhyMemOffByID(taskId, params[1]);
 				int32_t x = *(volatile int32_t*)CurPhyMem[taskId];
 				FindPhyMemOffByID(taskId, params[0]);
-				setInt(x);
+				setInt(x, taskId);
+			}
+			break;
+		case MOV_FLOAT:
+			if (ParamType == 0) {
+				FindPhyMemOffByID(taskId, params[0]);
+				float x = tranIntToFloat(params[1]);
+				setFloat(x, taskId);
+			} else {
+				FindPhyMemOffByID(taskId, params[1]);
+				float x = *(volatile float*)CurPhyMem[taskId];
+				FindPhyMemOffByID(taskId, params[0]);
+				setFloat(x, taskId);
 			}
 			break;
 		//将CalcResu的值保存于参数表示的地址中
@@ -622,13 +793,15 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			FindPhyMemOffByID(taskId, params[0]);
 			//保存为BYTE
 			if (ParamType == 0) {
-				setByte((int8_t)CalcResu[taskId]);
+				setByte((int8_t)CalcResu[taskId], taskId);
 				//保存为DWORD
 			} else if (ParamType == 1) {
-				setDByte((int16_t)CalcResu[taskId]);
+				setDByte((int16_t)CalcResu[taskId], taskId);
 				//保存为INT？我不知道四字节的变量怎么称呼
+			} else if (ParamType == 2) {
+				setInt((int32_t)CalcResu[taskId], taskId);
 			} else {
-				setInt((int32_t)CalcResu[taskId]);
+				setFloat((float)CalcResu[taskId], taskId);
 			}
 			break;
 		//子程序传参
@@ -640,20 +813,26 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 				} else if (ParamType == 1) {
 					Stack[IndexOfSPS].DATA.DWORD = (int16_t)params[1];
 					Stack[IndexOfSPS].Type = 2;
-				} else {
+				} else if (ParamType == 2) {
 					Stack[IndexOfSPS].DATA.INT = (int32_t)params[1];
+					Stack[IndexOfSPS].Type = 3;
+				} else {
+					Stack[IndexOfSPS].DATA.FLOAT = tranIntToFloat(params[1]);
 					Stack[IndexOfSPS].Type = 4;
 				}
 			} else {
 				FindPhyMemOffByID(taskId, params[1]);
 				if (ParamType == 0) {
-					Stack[IndexOfSPS].DATA.BYTE = findByteWithAddr();
+					Stack[IndexOfSPS].DATA.BYTE = findByteWithAddr(taskId);
 					Stack[IndexOfSPS].Type = 1;
 				} else if (ParamType == 1) {
-					Stack[IndexOfSPS].DATA.DWORD = findDByteWithAddr();
+					Stack[IndexOfSPS].DATA.DWORD = findDByteWithAddr(taskId);
 					Stack[IndexOfSPS].Type = 2;
+				} else if (ParamType == 2) {
+					Stack[IndexOfSPS].DATA.INT = findIntWithAddr(taskId);
+					Stack[IndexOfSPS].Type = 3;
 				} else {
-					Stack[IndexOfSPS].DATA.INT = findIntWithAddr();
+					Stack[IndexOfSPS].DATA.FLOAT = tranIntToFloat(params[1]);
 					Stack[IndexOfSPS].Type = 4;
 				}
 			}
@@ -691,11 +870,13 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			for (i = 0; i < OS_MAX_PARAM; i++) {
 				if (Stack[i].Type) {
 					if (Stack[i].Type == 1) {
-						setByte(Stack[i].DATA.BYTE);
+						setByte(Stack[i].DATA.BYTE, taskId);
 					} else if (Stack[i].Type == 2) {
-						setDByte(Stack[i].DATA.DWORD);
+						setDByte(Stack[i].DATA.DWORD, taskId);
+					} else if (Stack[i].Type == 3) {
+						setInt(Stack[i].DATA.INT, taskId);
 					} else {
-						setInt(Stack[i].DATA.INT);
+						setFloat(Stack[i].DATA.FLOAT, taskId);
 					}
 					//Type=0表示从这儿开始往后的参数栈都未启用
 					//参数栈的数据紧密相连，不存在跳跃
@@ -733,34 +914,35 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 		case GE:
 		case NE: {
 			// 解析参数类型和数据大小
-			uint8_t dataSize = params[0]; // 新增参数：1=BYTE, 2=DWORD, 4=INT
+			uint8_t dataSize = params[0]; // 新增参数：1=BYTE, 2=DWORD, 4=INT/FLOAT
 			if (dataSize != 1 && dataSize != 2 && dataSize != 4) {
 				return -1; // 非法数据大小
 			}
-			int32_t val1, val2;
+			//用double来覆盖所有类型最大可表示的值
+			//简化操作
+			double val1, val2;
+			//x用来判断参数是不是float类型（ParamType第三位）
+			uint8_t x = (ParamType & 0x04) >> 2;
+			//无论如何去掉第三位，否则可能参数误判
+			ParamType &= 0x03;
 			// 读取参数1的值（根据ParamType和dataSize）
 			if (ParamType == 0) {       // 两个立即数
-				val1 = params[1];
-				val2 = params[2];
-				// 对立即数进行符号扩展（若需要）
-				if (dataSize == 1) val1 = (int8_t)(val1 & 0xFF);
-				else if (dataSize == 2) val1 = (int16_t)(val1 & 0xFFFF);
+				val1 = x ? tranIntToFloat(params[1]) : params[1];
+				val2 = x ? tranIntToFloat(params[2]) : params[2];
 			} else if (ParamType == 1) { // 参数1为地址，参数2为立即数
 				// 从内存读取参数1的值
 				FindPhyMemOffByID(taskId, params[1]);
-				val1 = findIntWithAddr() << (4 - dataSize) >> (4 - dataSize);
+				val1 = x ? findFloatWithAddr(taskId) : findIntWithAddr(taskId) << (4 - dataSize) >> (4 - dataSize);
 				// 立即数参数2处理
-				val2 = params[2];
+				val2 = x ? tranIntToFloat(params[2]) : params[2];
 			} else if (ParamType == 2) { // 两个参数均为地址
 				// 读取参数1的地址
 				FindPhyMemOffByID(taskId, params[1]);
-				val1 = findIntWithAddr() << (4 - dataSize) >> (4 - dataSize);
+				val1 = x ? findFloatWithAddr(taskId) : findIntWithAddr(taskId) << (4 - dataSize) >> (4 - dataSize);
 				// 读取参数2的地址
 				FindPhyMemOffByID(taskId, params[2]);
-				val2 = findIntWithAddr() << (4 - dataSize) >> (4 - dataSize);
-			} else {
-				return -1; // 非法参数类型
-			}
+				val2 = x ? findFloatWithAddr(taskId) : findIntWithAddr(taskId) << (4 - dataSize) >> (4 - dataSize);
+			} else return -1; // 非法参数类型
 			// 根据指令进行比较
 			switch (cmd) {
 				case EQ:
@@ -788,80 +970,89 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 		}
 		//命令指针跳转到相应地址
 		case JMP:
-			CurCmd[taskId] = OS_EXE_LOAD_START + (volatile uint8_t *)params[0];
+			CurCmd[taskId] = (volatile uint8_t *)(OS_EXE_LOAD_START + params[0]);
 			break;
 		case JMP_T:
-			if (CalcResu)CurCmd[taskId] = OS_EXE_LOAD_START + (volatile uint8_t *)params[0];
+			if (CalcResu)CurCmd[taskId] = (volatile uint8_t *)(OS_EXE_LOAD_START + params[0]);
 			break;
-		//运算时全部视为INT类型
+		// 在 INTERPRETER.c 的 interprete 函数中修改以下部分
 		case ADD:
-			//全为立即数
-			if (ParamType == 0) {
-				CalcResu[taskId] = params[0] + params[1];
-				//一个为立即数一个为地址
-			} else if (ParamType == 1) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x + params[1];
-				//全为地址
-			} else if (ParamType == 2) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				FindPhyMemOffByID(taskId, params[1]);
-				int32_t y = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x + y;
-			}
-			break;
 		case SUB:
-			if (ParamType == 0) {
-				CalcResu[taskId] = params[0] - params[1];
-			} else if (ParamType == 1) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x - params[1];
-				//全为地址
-			} else if (ParamType == 2) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				FindPhyMemOffByID(taskId, params[1]);
-				int32_t y = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x - y;
-			}
-			break;
 		case MUL:
-			if (ParamType == 0) {
-				CalcResu[taskId] = params[0] * params[1];
-			} else if (ParamType == 1) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x * params[1];
-				//全为地址
-			} else if (ParamType == 2) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				FindPhyMemOffByID(taskId, params[1]);
-				int32_t y = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x * y;
+		case DIV: {
+			// 新增参数类型标识：ParamType 的第三位表示是否为浮点运算 (1=float)
+			uint8_t is_float = (ParamType & 0x04) >> 2;  // 取第三位
+			ParamType &= 0x03;  // 保留原始参数类型
+			float val1_f, val2_f, result_f;
+			int32_t val1_i, val2_i, result_i;
+			// 根据参数类型读取操作数（支持立即数、地址、混合类型）
+			if (is_float) {
+				// 处理浮点运算
+				if (ParamType == 0) {       // 两个立即数（需将 int32_t 转换为 float）
+					val1_f = *(float*)&params[0];
+					val2_f = *(float*)&params[1];
+				} else if (ParamType == 1) { // 参数1为地址，参数2为立即数
+					FindPhyMemOffByID(taskId, params[0]);
+					val1_f = findFloatWithAddr(taskId);
+					val2_f = *(float*)&params[1];
+				} else if (ParamType == 2) { // 两个参数均为地址
+					FindPhyMemOffByID(taskId, params[0]);
+					val1_f = findFloatWithAddr(taskId);
+					FindPhyMemOffByID(taskId, params[1]);
+					val2_f = findFloatWithAddr(taskId);
+				}
+				// 执行浮点运算
+				switch (cmd) {
+					case ADD:
+						result_f = val1_f + val2_f;
+						break;
+					case SUB:
+						result_f = val1_f - val2_f;
+						break;
+					case MUL:
+						result_f = val1_f * val2_f;
+						break;
+					case DIV:
+						if (val2_f == 0.0f) return DIV_BY_0;
+						result_f = val1_f / val2_f;
+						break;
+				}
+				// 将结果转换为 int32_t 存入 CalcResu（需确保内存对齐）
+				ARS_memmove(&CalcResu[taskId], &result_f, sizeof(float));
+			} else {
+				// 原有整数运算逻辑（略作调整）
+				if (ParamType == 0) {
+					val1_i = params[0];
+					val2_i = params[1];
+				} else if (ParamType == 1) {
+					FindPhyMemOffByID(taskId, params[0]);
+					val1_i = findIntWithAddr(taskId);
+					val2_i = params[1];
+				} else if (ParamType == 2) {
+					FindPhyMemOffByID(taskId, params[0]);
+					val1_i = findIntWithAddr(taskId);
+					FindPhyMemOffByID(taskId, params[1]);
+					val2_i = findIntWithAddr(taskId);
+				}
+				switch (cmd) {
+					case ADD:
+						result_i = val1_i + val2_i;
+						break;
+					case SUB:
+						result_i = val1_i - val2_i;
+						break;
+					case MUL:
+						result_i = val1_i * val2_i;
+						break;
+					case DIV:
+						if (val2_i == 0) return DIV_BY_0;
+						result_i = val1_i / val2_i;
+						break;
+				}
+				CalcResu[taskId] = result_i;
 			}
 			break;
-		case DIV:
-			if (ParamType == 0) {
-				if (params[1] == 0)return DIV_BY_0;
-				CalcResu[taskId] = params[0] / params[1];
-			} else if (ParamType == 1) {
-				if (params[1] == 0)return DIV_BY_0;
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				CalcResu[taskId] = x / params[1];
-			} else if (ParamType == 2) {
-				FindPhyMemOffByID(taskId, params[0]);
-				int32_t x = *(volatile int32_t *)CurPhyMem[taskId];
-				FindPhyMemOffByID(taskId, params[1]);
-				int32_t y = *(volatile int32_t *)CurPhyMem[taskId];
-				if (y == 0)return DIV_BY_0;
-				CalcResu[taskId] = x / y;
-			}
-			break;
+		}
 		case HLT:
 			return 1;
 			break;
