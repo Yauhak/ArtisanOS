@@ -123,6 +123,11 @@ static void _float_to_str(float num, char *buffer, int precision) {
 	buffer[len] = '\0';
 }
 
+char toupper(char chr){
+	if(chr>='a'&&chr<='z')return chr-('a'-'A');
+		else return chr;
+}
+
 //调用内联汇编的一些功能，实现端口读写
 static inline void ARS_outb(uint16_t port, uint8_t val) {
 	asm volatile("outb %0,%1"::"a"(val), "Nd"(port));
@@ -138,6 +143,41 @@ static inline char ARS_inw(uint16_t port) {
 	uint16_t rt;
 	asm volatile("inw %1,%0":"=a"(rt):"Nd"(port));
 	return rt;
+}
+
+//是否支持APM关机
+//检查是否支持APM关机的逻辑比ACPI简单不少
+//因此优先检查使用APM关机
+int8_t apm_supported() {
+	uint16_t status;
+	asm volatile("int $0x15"
+	             : "=a"(status)
+	             : "a"(0x5300), "b"(0x0000));
+	return (status & 0xFF) == 0x00; // AH=0 表示支持
+}
+
+//APM关机
+void apm_shutdown() {
+	asm volatile("outw %0, %1" : : "a"(0x07), "Nd"(0xB004));
+}
+
+//ACPI关机
+void acpi_shutdown() {
+	asm volatile("outw %0, %1" : : "a"(0x2000), "Nd"(0x604));
+}
+
+//CPU停止 强制关机
+void halt_cpu() {
+	asm volatile("cli; hlt");
+}
+
+void shutdown() {
+	if (apm_supported())
+		apm_shutdown();
+	else
+		acpi_shutdown();
+	//保险机制：强制停止
+	halt_cpu();
 }
 
 //输出一个字符
