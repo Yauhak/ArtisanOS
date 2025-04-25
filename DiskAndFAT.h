@@ -12,6 +12,8 @@
 	#define IDE_PORT_COMMAND     0x1F7
 	#define IDE_CMD_READ         0x20
 	#define IDE_CMD_WRITE        0x30
+	#define FAT_FREE_CLUSTER 0x000
+	#define FAT_END_CLUSTER 0xFF8
 
 //此处由DeepSeek生成
 // FAT12 引导扇区结构（共 512 字节）
@@ -66,10 +68,18 @@ struct DirEntry {
 static void ide_wait_ready();
 void ide_init();
 int ide_read_sector(uint32_t lba, void *buffer);
+int ide_write_sector(uint32_t lba, void *buffer);
+void flush_fat();
+static uint16_t find_free_cluster();
+static uint16_t allocate_cluster_chain(int sectors_needed);
+static void link_clusters(uint16_t prev, uint16_t next);
+int write_file(const char *path, void *data, uint32_t size);
 int fat12_init();
 static uint32_t data_start_lba();
 static uint16_t get_next_cluster(uint16_t cluster);
 uint16_t find_file(const char *path);
+static struct DirEntry* find_or_create_entry(const char *path);
+static void update_directory_entry(struct DirEntry *entry);
 struct DirEntry *find_entry_in_directory(uint16_t cluster, const char *name);
-int read_file(uint16_t cluster, void *buffer);
+int read_file(uint16_t cluster, void *buffer,int sect_count);
 #endif
