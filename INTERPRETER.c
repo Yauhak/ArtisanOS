@@ -2,6 +2,8 @@
 
 volatile uint8_t *CurCmd[OS_MAX_TASK];//每个程序当前执行的命令的位置，0表示未启用
 //为每个程序都分配的窗口缓冲区
+//其实屏幕缓冲区是最占内存的ㄟ( ▔, ▔ )ㄏ
+//这些公有变量占用内存在300K之内，但缓冲区占了256K
 extern uint8_t EXE_SCBUFF[OS_MAX_TASK][SCREEN_BUFFSIZE];
 extern uint16_t EXE_SC_POS[OS_MAX_TASK];
 //置顶窗口的ID
@@ -95,9 +97,9 @@ int8_t SuperFree(Magic *block) {
 			for (int i = 0; i < sizeof(Magic); i++) {
 				*x++ = 0;
 			}
-			//status=1表示该块内存与原先记录内存合并
+			//status非0表示该块内存与原先记录内存合并
 			//不需要追加到FreeTail
-			status = 1;
+			status++;
 		}
 		//空闲内存链表记录的内存块在后，向后合并
 		if (((uint8_t *)block) + block->len + sizeof(Magic) + RESERVED_BLOCKSIZE == (uint8_t *)ptr) {
@@ -115,17 +117,19 @@ int8_t SuperFree(Magic *block) {
 				//改成block的
 				img->next_block = (uint8_t *)block;
 			}
-			//等于二表示前后内存都扫描完了
-			//该尝试的合并已经完成
-			//可以直接返回结果
-			//不需要一直访问到链表末尾
-			status = 2;
+			status++;
 			// 在向后合并后检查是否为FreeTail
 			if (ptr == FreeTail) {
 				FreeTail = block; // 更新FreeTail为新合并的块
 			}
 			ptr = block; //更新ptr
 		}
+		//等于二表示前后内存都扫描完了
+		//该尝试的合并已经完成
+		//可以直接返回结果
+		//不需要一直访问到链表末尾
+		//虽然是惰性内存回收
+		//但似乎。。理论上来说，这几乎可以完全规避外部碎片？
 		if (status == 2) {
 			return 0;
 		}
@@ -537,13 +541,13 @@ void setFloat(float fText, uint8_t id) {
 
 float tranIntToFloat(int x) {
 	float result;
-	ARS_memmove(&result, &x, sizeof(int));  // 使用 memcpy 安全转换
+	ARS_memmove(&result, &x, sizeof(int));  // 安全转换
 	return result;
 }
 
 int tranFloatToInt(float x) {
 	int result;
-	ARS_memmove(&result, &x, sizeof(float));  // 使用 memcpy 安全转换
+	ARS_memmove(&result, &x, sizeof(float));  // 安全转换
 	return result;
 }
 
@@ -556,6 +560,10 @@ void init_mem_info() {
 		CurPhyMem[i] = (volatile uint8_t *)OS_PHY_MEM_START;
 	}
 }
+
+#define INVALID_INPUT  -10
+#define OVERFLOW_ERR   -11
+#define INVALID_TYPE   -12
 
 //注意！！
 //params并不代表它一定表示的是int类型
@@ -635,10 +643,6 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 		//输入数值
 		//DWORD，INT或FLOAT
 		case VALINPUT: {
-			// 定义错误码
-#define INVALID_INPUT  -10
-#define OVERFLOW_ERR   -11
-#define INVALID_TYPE   -12
 			// 定位目标内存地址
 			int8_t ret = FindPhyMemOffByID(taskId, params[0]);
 			if (ret != 0) return ret; // 地址无效直接返回
