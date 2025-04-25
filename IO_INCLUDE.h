@@ -29,21 +29,29 @@
 
 	#define MAKE_COLOR(fg, bg) ((bg << 4) | fg)
 	#define SCREEN_BUFFSIZE 4096
+	#define FAT_TABLE 5000//FAT表大小（事实上在FAT12中FAT表一般不会超过5000字节）
 	#define OS_MAX_TASK 64//最大可“多进程”执行64个程序
 	#define OS_MAX_PARAM 128//子程序传入参数的最大量（128）
 	#define OS_MAX_MEM 64*1024*1025//最大占用内存64MB（外加缓冲内存1KB）
-	#define OS_PHY_MEM_START 0x00100000//从物理内存的第1MB开始暂定为OS可操作的内存的首地址
-	#define OS_EXE_LOAD_START OS_PHY_MEM_START+OS_MAX_MEM+128//ARS特制EXE的加载的首地址
-	//事实上在文件读取过程中也会将一些扇区信息、FAT表等暂存于此处
+	#define OS_PHY_MEM_START 0x00250000//从物理内存的第2.5MB开始暂定为OS可操作的内存的首地址
+	//在文件读取过程中也会将一些扇区信息、FAT表等暂存于此处
+	#define OS_FAT_LOAD_START OS_PHY_MEM_START+OS_MAX_MEM+128
+	#define OS_EXE_LOAD_START OS_FAT_LOAD_START+FAT_TABLE+128//ARS特制EXE的加载的首地址
 
 	volatile void *ARS_memmove(volatile void *dest, volatile const void *src, int n);
 	volatile void *ARS_memset(volatile void *dest, volatile const void *byte, int n);
 	uint16_t ARS_strlen(const uint8_t *str);
 	uint8_t ARS_strcmp(const char *haystack, const char *needle, int len);
 	char *ARS_strtok(char *str,const char delim);
+	char toupper(char chr);
 	static inline void ARS_outb(uint16_t port, uint8_t val);
 	static inline char ARS_inb(uint16_t port);
 	static inline char ARS_inw(uint16_t port);
+	int8_t apm_supported();
+	void apm_shutdown();
+	void acpi_shutdown();
+	void halt_cpu();
+	void shutdown();
 	void ARS_pc(uint8_t c,uint8_t id);
 	char ARS_gc(uint8_t id);
 	void DispBuff(const char *dest,uint16_t count,uint8_t id);
