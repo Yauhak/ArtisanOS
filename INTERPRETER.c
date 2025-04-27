@@ -1,4 +1,5 @@
 #include "INTERPRETER.h"
+#include "DiskAndFAT.h"
 
 volatile uint8_t *CurCmd[OS_MAX_TASK];//每个程序当前执行的命令的位置，0表示未启用
 //为每个程序都分配的窗口缓冲区
@@ -90,13 +91,12 @@ int8_t SuperFree(Magic *block) {
 			}
 		}
 		//空闲内存链表记录的内存块之一恰好在block前，向前合并
-		//RESERVED_BLOCKSIZE表示预留缓冲区大小,三字节
-		if (((uint8_t *)ptr) + ptr->len + sizeof(Magic) + RESERVED_BLOCKSIZE == (uint8_t *)block) {
+		if (((uint8_t *)ptr) + ptr->len + sizeof(Magic) == (uint8_t *)block) {
 			findPrev = 1;
 			spot1 = ptr;
 			status++;
 		}
-		if (((uint8_t *)block) + block->len + sizeof(Magic) + RESERVED_BLOCKSIZE == (uint8_t *)ptr) {
+		if (((uint8_t *)block) + block->len + sizeof(Magic) == (uint8_t *)ptr) {
 			findNext = 1;
 			spot2 = ptr;
 			if (img)img1 = img; //上一块的快照
@@ -158,6 +158,9 @@ int8_t SuperFree(Magic *block) {
 		if (spot2 == FreeTail) {
 			FreeTail = block; // 更新FreeTail为新合并的块
 		}
+		if (spot2 == (Magic *)FreeHead) {
+			FreeHead = (uint8_t *)block; // 更新FreeHead为新合并的块
+		}
 		return 0;
 	}
 	//如果找不到可以合并的，提示将该块内存追加到FreeTail
@@ -184,8 +187,7 @@ int8_t ReArrangeMemAndTask(uint8_t id) {
 				M->MagicHead[2] = 'E';
 				M->MagicHead[3] = 'E';
 				//去除魔术字后该块内存的长度
-				//加上缓冲字节
-				int size = M->len + RESERVED_BLOCKSIZE;
+				int size = M->len;
 				volatile uint8_t *next = M->next_block;
 				//跳过Magic头注销内存
 				volatile uint8_t *PhyMem = (uint8_t *)(M + sizeof(Magic));
@@ -257,7 +259,7 @@ int8_t DelLastFuncMem(uint8_t id) {
 		LastFuncCmd = (volatile uint8_t *)(M + sizeof(Magic) + sizeof(int32_t));
 	}
 	//不可越界
-	while (M < (Magic *)(OS_PHY_MEM_START + OS_MAX_MEM)) {
+	if (((uint8_t *)M) + M->len < (uint8_t *)(OS_PHY_MEM_START + OS_MAX_MEM)) {
 		//魔术字匹配
 		if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4)) {
 			//ID匹配
@@ -271,8 +273,6 @@ int8_t DelLastFuncMem(uint8_t id) {
 					*ptr++ = 'E';
 					*ptr++ = 'E';
 					//销毁内存
-					M->len += RESERVED_BLOCKSIZE;
-					//必须加上缓冲字节长度
 					ptr += sizeof(Magic) - sizeof(M->MagicHead);
 					for (int i = 0; i < M->len; i++) {
 						*ptr++ = 0;
@@ -311,12 +311,12 @@ int8_t DelLastFuncMem(uint8_t id) {
 			int8_t Repair = ResumeMem(M, id);
 			if (Repair == HEAD_ERR)return MEM_CLEAN_PARTLY;
 		}
-	}
-	return OUT_BOUND;
+	} else return OUT_BOUND;
 }
 
 //查找空闲的内存空间
 //为新的主/子程序分配内存
+//首次适应分配
 int findFreeMemById(uint8_t id, int allocLen, int level) {
 	//总长度TTL=子程序运行所需内存+4字节调用时 运行内存指针 指向地址+4字节调用时 命令内存指针 指向地址
 	//以便RET后跳回调用该子程序的代码块和内存
@@ -328,31 +328,29 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 		if (!M) {
 			return NO_MEM_TAIL;
 		}
-		//循环到占用内存末尾
-		//注意：MemTail指的是最近一个子程序的内存首地址，不是末尾！！！
-		while (1) {
-			if (M->next_block) {
-				M = (Magic *)M->next_block;
-			} else {
-				break;
-			}
-		}
 	}
 	//从头查找空闲内存
 	uint8_t *M2 = (uint8_t *)FreeHead;
 	uint8_t isalloc = 0;
-	//下一块空闲块
-	volatile uint8_t *next_free;
+	//上一块空闲块
+	volatile uint8_t *prev_free = 0;
 	if (M2) {
-		while (M2 < (uint8_t *)LastMEM) {
+		while (M2 < (uint8_t *)LastMEM && M2) {
 			//发现空闲的魔术字
 			if (!ARS_strcmp((const char*) M2, FREE, 4)) {
-				//该块内存至少大于Magic头+末尾三个预留字节
-				//因为SetDByte和SetInt函数是连续写入内存的
-				//但分配给程序的内存在空间上并不是完全连续的
-				//可能导致其他内存的意外覆盖
-				//而预留缓冲字节是我想到的最简单的处理办法
-				if (((Magic*)M2)->len > sizeof(Magic) + RESERVED_BLOCKSIZE) {
+				//若该块空闲内存大小为需求大小的1至1.2倍间
+				if (((Magic*)M2)->len > TTL && ((Magic*)M2)->len < TTL * 1.2) {
+					//判断该块空闲内存在链表中的位置情况
+					if (prev_free && M2 != (uint8_t *)FreeTail) {
+						//中间位置
+						((Magic*)prev_free)->next_block = ((Magic*)M2)->next_block;
+					} else if (!prev_free && M2 == FreeHead) {
+						//链头就是
+						FreeHead = ((Magic*)M2)->next_block;
+					} else if (M2 == (uint8_t *)FreeTail) {
+						//链尾
+						FreeTail = ((Magic*)prev_free);
+					} else break;
 					//魔术字覆盖
 					*M2 = 'S';
 					*(M2 + 1) = 'P';
@@ -360,96 +358,48 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 					*(M2 + 3) = 'T';
 					//ID覆盖
 					((Magic*)M2)->id = id;
-					//设置在该块空闲内存的占用长度
-					//为了方便内存释放后的管理
-					//只好统一设定每个FREE内存块重利用时预留后三个字节为缓冲字节
-					//释放后要吞并这三个字节
-					int32_t prevLen = ((Magic*)M2)->len;
-					((Magic*)M2)->len = (TTL > ((Magic*)M2)->len - RESERVED_BLOCKSIZE) ?
-					                    ((Magic*)M2)->len - RESERVED_BLOCKSIZE : TTL;
-					// 分配后，剩余空间处理：
-					// 如果剩余空间大小超过（魔术字头+3字节缓冲）才重新划分
-					// TTL + RESERVED_BLOCKSIZE代表此前分配所需大小
-					// sizeof(Magic) + RESERVED_BLOCKSIZE代表分配后有效内存的最小大小
-					if (prevLen > TTL + sizeof(Magic) + 2 * RESERVED_BLOCKSIZE) {
-						Magic *remaining = (Magic *)((uint8_t *)M2 + TTL + sizeof(Magic) + RESERVED_BLOCKSIZE);
-						remaining->MagicHead[0] = 'F';
-						remaining->MagicHead[1] = 'R';
-						remaining->MagicHead[2] = 'E';
-						remaining->MagicHead[3] = 'E';
-						remaining->len = prevLen - sizeof(Magic) - TTL - RESERVED_BLOCKSIZE;
-						remaining->Check = CHECK;
-						if (FreeHead == 0) {
-							FreeHead = (volatile uint8_t *)remaining;
-							FreeTail = (Magic *)FreeHead;
-							FreeTail->next_block = 0;
-						} else {
-							FreeTail->next_block = (volatile uint8_t *)remaining;
-							Magic *Now = (Magic *)remaining;
-							if (SuperFree(Now) == NEED_APPEND_TO_TAIL) {
-								FreeTail = remaining;
-								FreeTail->next_block = 0;
-							} else {
-								FreeTail->next_block = 0;
-							}
-						}
-					}
+					((Magic*)M2)->len = TTL;
 					((Magic *)M2)->Check = CHECK;
 					//链表指向上一块内存
 					if (CurCmd[id]) {
 						((Magic *)M2)->last_block = (volatile uint8_t *)M;
+						MemTail[id] = M2;
 					} else {
 						//若该进程此次才启用
 						MemHead[id] = M2;
 						MemTail[id] = M2;
-						M = (Magic *)M2;
 						//此时没有上一块内存
 						((Magic *)M2)->last_block = 0;
 					}
-					next_free = ((Magic *)M2)->next_block;
 					//暂无需下一块内存
 					((Magic *)M2)->next_block = 0;
 					((Magic *)M2)->level = level;
-					//需求内存的长度自减
-					TTL = TTL - ((Magic*)M2)->len;
 					//存在上下块内存的指向关系
 					if (CurCmd[id]) {
 						//上一块内存指向下一块内存
 						M->next_block = M2;
 						//跳转至最新分配的内存
-						M = (Magic *)M->next_block;
 					} else {
 						//跳转到“应用程序”的加载地址
 						CurCmd[id] = (volatile uint8_t *)OS_EXE_LOAD_START;
 					}
-					//如果存在下一个空闲块
-					if (next_free) {
-						//跳转至下一块空闲块
-						M2 = (uint8_t *)next_free;
-						((Magic *)M2)->last_block = 0;
-						//空闲块头更新
-						FreeHead = (uint8_t *)next_free;
-					}
-					//内存已分配完毕
-					if (TTL <= 0) {
-						isalloc = 1;
-						break;
-					}
-				} else M2 = (uint8_t *)((Magic *)M2)->next_block;
+					isalloc = 1;
+					break;
+				}
 			} else {
 				int8_t Repair = ResumeMem((Magic *)M2, id);
 				if (Repair == HEAD_ERR)return HEAD_ERR;
 			}
+			prev_free = M2;
+			M2 = (uint8_t *)((Magic *)M2)->next_block;
 		}
 	}
-	//还是没有分配完毕
+	//没有合适的块
 	if (!isalloc) {
-		//视为此前释放的空闲块已经用光，清零
-		FreeHead = 0;
 		//从目前占用的物理内存的末尾开始启用新内存
-		Magic *M3 = (Magic *)LastMEM + 1;
+		Magic *M3 = (Magic *)LastMEM;
 		//越界！
-		if (M3 + sizeof(Magic) + TTL >= (Magic *)OS_PHY_MEM_START + OS_MAX_MEM) {
+		if ((uint8_t *)M3 + sizeof(Magic) + TTL >= (uint8_t *)OS_PHY_MEM_START + OS_MAX_MEM) {
 			return OUT_BOUND;
 		}
 		M3->MagicHead[0] = 'S';
@@ -463,21 +413,22 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 		M3->last_block = (volatile uint8_t *)M;
 		M3->next_block = 0;
 		M3->level = level;
-		M->next_block = (volatile uint8_t *)M3;
-		M = (Magic *)M->next_block;
-		LastMEM += sizeof(Magic) + TTL + RESERVED_BLOCKSIZE;
-	}
-	//回溯至子程序物理内存的首地址
-	while (M >= (Magic *)(OS_PHY_MEM_START)) {
-		M = (Magic *)M->last_block;
-		if (M->level != level || M->last_block == 0) {
-			if (M->level != level)MemTail[id] = M->next_block;
-			if (M->last_block == 0)MemTail[id] = (volatile uint8_t *)M;
-			//告知虚拟机为主、子程序分配的物理内存首地址
-			CurPhyMem[id] = (volatile uint8_t *)MemTail[id];
-			return 0;
+		if (CurCmd[id]) {
+			M->next_block = (volatile uint8_t *)M3;
+			MemTail[id] = (uint8_t *)M3;
+		} else {
+			//若该进程此次才启用
+			MemHead[id] = (uint8_t *)M3;
+			MemTail[id] = (uint8_t *)M3;
+			//此时没有上一块内存
+			M3->last_block = 0;
+			M3->next_block = 0;
+			CurCmd[id] = (volatile uint8_t *)OS_EXE_LOAD_START;
 		}
+		LastMEM += sizeof(Magic) + TTL;
+		MemTail[id] = (uint8_t *)M3;
 	}
+	CurPhyMem[id] = MemTail[id];
 }
 
 //根据程序id查找其目前访问的“虚拟地址”对应的“物理地址”
@@ -781,6 +732,24 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			}
 			break;
 		}
+		case READFILE:
+			char nameBuff[256], i = 0;
+			FindPhyMemOffByID(taskId, params[1]);
+			while (*CurPhyMem) {
+				nameBuff[i++] = *(uint8_t *)CurPhyMem[taskId]++;
+			}
+			nameBuff[i] = 0; //文件名
+			int sect_count;
+			if (ParamType == 0) {
+				sect_count = params[2];
+			} else {
+				FindPhyMemOffByID(taskId, params[2]);
+				sect_count = findIntWithAddr(taskId);
+			}
+			uint16_t file_handle = find_file(nameBuff);
+			FindPhyMemOffByID(taskId, params[0]);
+			read_file(file_handle, (uint8_t *)CurPhyMem[taskId], sect_count);
+			break;
 		// 将参数2（立即数或地址，大小为一个字节）存入参数1表示的地址内存
 		case MOV_BYTE:
 			if (ParamType == 0) {
