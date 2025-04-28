@@ -348,6 +348,20 @@ uint16_t find_file(const char *path) {
 	return current_cluster;
 }
 
+void del_file(const char *path) {
+	char *token;
+	char temp_path[256];
+	ARS_memmove(temp_path, path, ARS_strlen(path));
+	uint16_t current_cluster = 0; // 0 表示从根目录开始
+	struct DirEntry *entry;
+	token = ARS_strtok(temp_path, '\\');
+	while (token != (void *)0) {
+		entry = find_entry_in_directory(current_cluster, token);
+		token = ARS_strtok(token + ARS_strlen(token), '\\');
+	}
+	entry->filename[0] == 0xE5;//标记条目删除
+}
+
 // 在指定目录簇中查找条目
 struct DirEntry *find_entry_in_directory(uint16_t cluster, const char *name) {
 	char Fname[11];
