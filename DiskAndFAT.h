@@ -78,6 +78,7 @@ int fat12_init();
 static uint32_t data_start_lba();
 static uint16_t get_next_cluster(uint16_t cluster);
 uint16_t find_file(const char *path);
+void del_file(const char *path);
 static struct DirEntry* find_or_create_entry(const char *path);
 static void update_directory_entry(struct DirEntry *entry);
 struct DirEntry *find_entry_in_directory(uint16_t cluster, const char *name);
