@@ -50,7 +50,7 @@ int8_t ResumeMem(Magic *M, uint8_t id) {
 	}
 }
 
-//内存模型：[魔术字块][数据块]。。。
+//内存模型：[魔术字块][数据块][末尾三个字节的预留缓冲块]
 
 /*
 	空闲块链表并不是按物理地址顺序排序的，而是按释放的时间先后顺序排序，
@@ -732,7 +732,7 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			}
 			break;
 		}
-		case READFILE:
+		case READFILE: {
 			char nameBuff[256], i = 0;
 			FindPhyMemOffByID(taskId, params[1]);
 			while (*CurPhyMem) {
@@ -749,7 +749,36 @@ int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 			uint16_t file_handle = find_file(nameBuff);
 			FindPhyMemOffByID(taskId, params[0]);
 			read_file(file_handle, (uint8_t *)CurPhyMem[taskId], sect_count);
-			break;
+		}
+		break;
+		case WRITEFILE: {
+			char nameBuff[256], i = 0;
+			FindPhyMemOffByID(taskId, params[0]);
+			while (*CurPhyMem) {
+				nameBuff[i++] = *(uint8_t *)CurPhyMem[taskId]++;
+			}
+			nameBuff[i] = 0; //文件名
+			int file_size;
+			if (ParamType == 0) {
+				file_size = params[2];
+			} else {
+				FindPhyMemOffByID(taskId, params[2]);
+				file_size = findIntWithAddr(taskId);
+			}
+			FindPhyMemOffByID(taskId, params[1]);
+			write_file(nameBuff, (uint8_t *)CurPhyMem[taskId], file_size);
+		}
+		break;
+		case DEL_FILE: {
+			char nameBuff[256], i = 0;
+			FindPhyMemOffByID(taskId, params[0]);
+			while (*CurPhyMem) {
+				nameBuff[i++] = *(uint8_t *)CurPhyMem[taskId]++;
+			}
+			nameBuff[i] = 0; //文件名
+			del_file(nameBuff);
+		}
+		break;
 		// 将参数2（立即数或地址，大小为一个字节）存入参数1表示的地址内存
 		case MOV_BYTE:
 			if (ParamType == 0) {
