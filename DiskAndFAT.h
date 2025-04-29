@@ -1,6 +1,9 @@
+#ifndef IO_INCLUDE
+	#include"IO_INCLUDE.h"
+#endif
+
 #ifndef DISK_FAT
 	#define DISK_FAT
-	#include"IO_INCLUDE.h"
 	
 	#define IDE_PORT_DATA        0x1F0
 	#define IDE_PORT_ERROR       0x1F1
