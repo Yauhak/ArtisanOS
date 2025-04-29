@@ -4,6 +4,10 @@
 
 #define IFISTOPWINDOW if(TopWindowId==id)
 
+#define SCROLL_UP   0x01
+#define SCROLL_DOWN 0x02
+#define SCROLL_SIZE 4   // 每次滚动行数
+
 //当前文本颜色
 uint8_t text_color = MAKE_COLOR(COLOR_WHITE, COLOR_BLACK);
 //当前光标位置
@@ -44,7 +48,6 @@ volatile void *ARS_memset(volatile void *dest, volatile const void *byte, int n)
 	}
 	return dest;
 }
-
 
 uint16_t ARS_strlen(const uint8_t *str) {
 	const uint8_t *ptr = str;
@@ -123,9 +126,9 @@ static void _float_to_str(float num, char *buffer, int precision) {
 	buffer[len] = '\0';
 }
 
-char toupper(char chr){
-	if(chr>='a'&&chr<='z')return chr-('a'-'A');
-		else return chr;
+char toupper(char chr) {
+	if (chr >= 'a' && chr <= 'z')return chr - ('a' - 'A');
+	else return chr;
 }
 
 //调用内联汇编的一些功能，实现端口读写
@@ -180,6 +183,45 @@ void shutdown() {
 	halt_cpu();
 }
 
+// 带缓冲区的滚动函数
+static void scroll_with_buffer(volatile uint16_t *vram,uint8_t id,uint8_t direction) {
+	uint16_t screen_width = VGA_WIDTH;
+	uint16_t screen_height = VGA_HEIGHT;
+	// 计算可滚动行数（根据缓冲区内容）
+	uint16_t buffer_lines = EXE_SC_POS[id] / VGA_WIDTH;
+	uint16_t current_line = cursor_pos / VGA_WIDTH;
+	uint16_t max_line = buffer_lines > screen_height ? buffer_lines : screen_height;
+	if (direction == SCROLL_UP && current_line > 0) {
+		// 计算需要加载的缓冲区起始位置
+		uint16_t new_start = EXE_SC_POS[id] - (SCROLL_SIZE * VGA_WIDTH);
+		if (new_start < 0) new_start = 0;
+		// 从缓冲区加载历史内容到显存顶部
+		for (int i = 0; i < SCROLL_SIZE; i++) {
+			uint16_t src_offset = new_start + i * VGA_WIDTH;
+			uint16_t dst_offset = i * VGA_WIDTH;
+			ARS_memmove(&vram[dst_offset],&EXE_SCBUFF[id][src_offset],VGA_WIDTH * sizeof(uint16_t));
+		}
+		cursor_pos -= SCROLL_SIZE * VGA_WIDTH;
+	} else if (direction == SCROLL_DOWN && current_line < max_line) {
+		// 计算需要加载的缓冲区起始位置
+		uint16_t new_start = cursor_pos + (SCROLL_SIZE * VGA_WIDTH);
+		if (new_start + screen_height * VGA_WIDTH > EXE_SC_POS[id]) {
+			new_start = EXE_SC_POS[id] - screen_height * VGA_WIDTH;
+		}
+		// 从缓冲区加载后续内容到显存底部
+		for (int i = 0; i < SCROLL_SIZE; i++) {
+			uint16_t src_offset = new_start + i * VGA_WIDTH;
+			uint16_t dst_offset = (screen_height - SCROLL_SIZE + i) * VGA_WIDTH;
+			ARS_memmove(&vram[dst_offset],&EXE_SCBUFF[id][src_offset],VGA_WIDTH * sizeof(uint16_t));
+		}
+		cursor_pos += SCROLL_SIZE * VGA_WIDTH;
+	}
+	// 光标边界保护
+	if (cursor_pos < 0) cursor_pos = 0;
+	if (cursor_pos >= screen_width * screen_height)
+		cursor_pos = screen_width * (screen_height - 1);
+}
+
 //输出一个字符
 //可以处理换行和退格情况
 //可以处理窗口置顶或否的情况
@@ -212,21 +254,39 @@ void ARS_pc(uint8_t c, uint8_t id) {
 				vram[cursor_pos] = (text_color << 8) | ' ';  // 用空格覆盖退格
 			}
 			break;
-		case KEY_UP:    // 上键
-			cursor_pos = (cursor_pos >= screen_width) ? cursor_pos - screen_width : 0;
+		case KEY_UP:
+			if ((cursor_pos / screen_width) == 0) { // 顶部边界
+				scroll_with_buffer(vram, id, SCROLL_UP);
+			} else {
+				cursor_pos -= screen_width;
+			}
 			break;
-		case KEY_DOWN:  // 下键
-			cursor_pos = (cursor_pos + screen_width < screen_width * screen_height)
-			             ? cursor_pos + screen_width
-			             : cursor_pos;
+		case KEY_DOWN:
+			if ((cursor_pos / screen_width) == (screen_height - 1)) { // 底部边界
+				scroll_with_buffer(vram, id, SCROLL_DOWN);
+			} else {
+				cursor_pos += screen_width;
+			}
 			break;
-		case KEY_LEFT:  // 左键
-			cursor_pos = (cursor_pos > 0) ? cursor_pos - 1 : 0;
+		case KEY_LEFT:
+			if (cursor_pos % screen_width == 0) { // 左边界
+				if (cursor_pos >= screen_width) { // 非首行
+					cursor_pos -= screen_width;
+					cursor_pos += (screen_width - 1); // 跳转到行尾
+				}
+			} else {
+				cursor_pos--;
+			}
 			break;
-		case KEY_RIGHT: // 右键
-			cursor_pos = (cursor_pos + 1 < screen_width * screen_height)
-			             ? cursor_pos + 1
-			             : cursor_pos;
+		case KEY_RIGHT:
+			if ((cursor_pos % screen_width) == (screen_width - 1)) { // 右边界
+				if (cursor_pos < screen_width * (screen_height - 1)) { // 非末行
+					cursor_pos += screen_width;
+					cursor_pos -= (screen_width - 1); // 跳转到下行首
+				}
+			} else {
+				cursor_pos++;
+			}
 			break;
 		default:        // 普通字符
 			vram[cursor_pos++] = (text_color << 8) | c;
@@ -234,16 +294,25 @@ void ARS_pc(uint8_t c, uint8_t id) {
 	}
 	// 屏幕滚动处理（仅程序窗口）
 	IFISTOPWINDOW
-	if (id >= 0 && id < OS_MAX_TASK) {
-		if (cursor_pos >= screen_width * screen_height) {
-			// 向上滚动一行
-			ARS_memmove(vram, vram + screen_width, (screen_height - 1) * screen_width * sizeof(uint16_t));
-			cursor_pos -= screen_width;
-			// 清空新行
-			for (int i = 0; i < screen_width; i++) {
-				vram[cursor_pos + i] = (text_color << 8) | ' ';
+	if (cursor_pos >= screen_width * screen_height) {
+		// 当滚动到底部时自动加载缓冲区后续内容
+		uint16_t buffer_remain = EXE_SC_POS[id] - (cursor_pos - screen_height * VGA_WIDTH);
+		uint16_t load_lines;
+		if (buffer_remain > 0) {
+			load_lines = buffer_remain / VGA_WIDTH;
+			load_lines = load_lines > SCROLL_SIZE ? SCROLL_SIZE : load_lines;
+			ARS_memmove(vram,
+			            vram + load_lines * VGA_WIDTH,
+			            (screen_height - load_lines)*VGA_WIDTH * sizeof(uint16_t));
+			// 从缓冲区填充新行
+			uint16_t src_pos = cursor_pos - (screen_height * VGA_WIDTH);
+			for (int i = 0; i < load_lines; i++) {
+				ARS_memmove(vram + (screen_height - load_lines + i)*VGA_WIDTH,
+				            &EXE_SCBUFF[id][src_pos + i * VGA_WIDTH],
+				            VGA_WIDTH * sizeof(uint16_t));
 			}
 		}
+		cursor_pos = screen_width * (screen_height - load_lines);
 	}
 	// 更新屏幕缓冲区
 	if (id >= 0 && id < OS_MAX_TASK) {
@@ -263,7 +332,7 @@ void ARS_pc(uint8_t c, uint8_t id) {
 }
 
 // PS/2键盘驱动
-char ARS_gc(uint8_t id) {
+char ARS_gc(uint8_t id, uint8_t isshowoff) {
 	if (ARS_inb(0x64) & 0x1) {
 		char chr = ARS_inb(0x60);
 		static uint8_t is_ext = 0;
@@ -294,8 +363,9 @@ char ARS_gc(uint8_t id) {
 			}
 		}
 		//有回显地接收键盘输入
-		if (chr >= ' ' && chr <= '~')
-			ARS_pc(chr, id);
+		if (isshowoff)
+			if (chr >= ' ' && chr <= '~')
+				ARS_pc(chr, id);
 		return chr;
 	} else return -1;
 }
