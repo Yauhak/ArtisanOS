@@ -1,5 +1,5 @@
 #ifndef MEMORY
-	#include"Memory.h"
+	#include "Memory.h"
 #endif
 
 volatile uint8_t *CurCmd[OS_MAX_TASK];//每个程序当前执行的命令的位置，0表示未启用
@@ -439,39 +439,31 @@ int findFreeMemById(uint8_t id, int allocLen, int level) {
 
 //根据程序id查找其目前访问的“虚拟地址”对应的“物理地址”
 uint8_t FindPhyMemOffByID(uint8_t id, uint32_t offset) {
-	int VAddr = 0;
 	//除了公有变量，活跃的变量一定是最近启动的子程序的变量
 	Magic *M = (Magic *)MemTail[id];
 	if (!M) {
 		return NO_MEM_TAIL;
 	}
-	while (M < (Magic *)(OS_PHY_MEM_START + OS_MAX_MEM)) {
-		//发现魔术字
-		if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4)) {
-			//id对应上了
-			if (M->id == id) {
-				//魔术字头记录的内存块长度不包括魔术字头本身
-				int size = M->len;
-				if (size < 0) {
-					return INVALID_LEN;
-				}
-				if (VAddr + size >= offset) {
-					CurPhyMem[id] = ((volatile uint8_t *)M) + sizeof(Magic) + offset - VAddr; //成功查找到
-					return 0;
-				}
-				if (M->next_block == 0 && VAddr + size < offset) {
-					return BAD_MEM_TRACE;
-				}
-				M = (Magic *)M->next_block;
-				VAddr += size;
-				continue;
-			} else return ID_ERR;
-		} else {
-			int8_t Repair = ResumeMem(M, id);
-			if (Repair == HEAD_ERR)return HEAD_ERR;
-		}
+	//发现魔术字
+Execute:
+	if (!ARS_strcmp((const char*) M->MagicHead, SPLIT, 4)) {
+		//id对应上了
+		if (M->id == id) {
+			//魔术字头记录的内存块长度不包括魔术字头本身
+			int size = M->len;
+			if (size < 0) {
+				return INVALID_LEN;
+			}
+			if (size >= offset) {
+				CurPhyMem[id] = ((volatile uint8_t *)M) + sizeof(Magic) + offset; //成功查找到
+				return 0;
+			} else return OUT_BOUND;
+		} else return ID_ERR;
+	} else {
+		int8_t Repair = ResumeMem(M, id);
+		if (Repair == HEAD_ERR)return HEAD_ERR;
+		goto Execute;
 	}
-	return OUT_BOUND;
 }
 
 void ReadByteMem(uint8_t *Recv, uint8_t id) {
@@ -486,14 +478,6 @@ int8_t findByteWithAddr(uint8_t id) {
 	ReadByteMem(&Byte_Buff, id);
 	CurPhyMem[id]++;
 	return Byte_Buff;
-}
-
-//访问 双字节
-int16_t findDByteWithWithAddr(uint8_t id) {
-	int16_t value;
-	value = *((int16_t *)CurPhyMem[id]);
-	CurPhyMem[id] += 2;
-	return value;
 }
 
 //访问 四字节
@@ -518,11 +502,6 @@ void setByte(int8_t byteText, uint8_t id) {
 	*CurPhyMem[id]++ = byteText;
 }
 
-void setDByte(int16_t DbyteText, uint8_t id) {
-	ARS_memmove(CurPhyMem[id], &DbyteText, sizeof(int16_t));
-	CurPhyMem[id] += sizeof(int16_t);
-}
-
 void setInt(int32_t intText, uint8_t id) {
 	ARS_memmove(CurPhyMem[id], &intText, sizeof(int32_t));
 	CurPhyMem[id] += sizeof(int32_t);
@@ -533,6 +512,10 @@ void setFloat(float fText, uint8_t id) {
 	CurPhyMem[id] += sizeof(float);
 }
 
+//这两个函数虽然名字看似是类型转换
+//其实应该是将相同的内存块进行原封不动的抄写，并以不同形式（INT,FLOAT）读出来
+//而内存块的内容并没有改变
+//像float x=1.14;int y=x;就会改变因为类型转换而造成内存内容的不同
 float tranIntToFloat(int x) {
 	float result;
 	ARS_memmove(&result, &x, sizeof(int));  // 安全转换
@@ -544,4 +527,3 @@ int tranFloatToInt(float x) {
 	ARS_memmove(&result, &x, sizeof(float));  // 安全转换
 	return result;
 }
-
