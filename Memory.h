@@ -53,7 +53,7 @@ struct ParamStack {
 	int8_t Type;
 	union {
 		int8_t BYTE;
-		int16_t DWORD;
+		//int16_t DWORD;现在抛弃了DWORD类型，因为几乎没用
 		int32_t INT;
 		float FLOAT;
 	} DATA __attribute__((aligned(4))); // 4字节对齐
@@ -64,11 +64,9 @@ typedef struct ParamStack ParamStack;
 void init_mem_info();
 void ReadByteMem(uint8_t *Recv,uint8_t id);
 int8_t findByteWithAddr(uint8_t id);
-int16_t findDByteWithAddr(uint8_t id);
 int findIntWithAddr(uint8_t id);
 float findFloatWithAddr(uint8_t id);
 void setByte(int8_t byteText,uint8_t id);
-void setDByte(int16_t DbyteText,uint8_t id);
 void setInt(int32_t intText,uint8_t id);
 void setFloat(float fText, uint8_t id);
 float tranIntToFloat(int x);
