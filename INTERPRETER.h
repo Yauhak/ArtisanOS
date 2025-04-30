@@ -41,6 +41,7 @@ typedef enum {
 	WRITEFILE,//写文件
 	DEL_FILE,//删除文件
 	MOV, // 将参数2（立即数或地址，BYTE,DWORD,INT,FLOAT）存入参数1表示的地址内存
+	IVKARRAY,//访问数组元素
 	PUSH,//将CalcResu的值保存于参数表示的地址中
 	PUSHP,//为子程序传入参数
 	EQ, // 判断参数1 == 参数2，结果存CalcResu
@@ -76,6 +77,7 @@ int8_t _read_file(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t _write_file(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t _del_file(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t mov(uint8_t ParamType, int32_t *params, uint16_t taskId);
+int8_t invoke_array(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t push(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t pushp(uint8_t ParamType, int32_t *params, uint16_t taskId);
 int8_t call(uint8_t ParamType, int32_t *params, uint16_t taskId);
