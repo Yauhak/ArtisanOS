@@ -22,7 +22,7 @@ void DispBuff(const char *dest, uint16_t count, uint8_t id) {
 }
 
 void ToppingWindowById(uint8_t id) {
-	DispBuff(EXE_SCBUFF[id], EXE_SC_POS[id], id);
+	DispBuff((char *)EXE_SCBUFF[id], EXE_SC_POS[id], id);
 }
 
 volatile void *ARS_memmove(volatile void *dest, volatile const void *src, int n) {
@@ -49,8 +49,8 @@ volatile void *ARS_memset(volatile void *dest, volatile const void *byte, int n)
 	return dest;
 }
 
-uint16_t ARS_strlen(const uint8_t *str) {
-	const uint8_t *ptr = str;
+uint16_t ARS_strlen(const char *str) {
+	const char *ptr = str;
 	uint16_t len = 0;
 	while (*ptr++ != 0)len++;
 	return len;
@@ -75,6 +75,38 @@ char *ARS_strtok(char *str, const char delim) {
 		*ptr = 0;
 	}
 	return str;
+}
+
+static double str_to_double(char *p) {
+	uint8_t is_negative = 0;
+	uint8_t has_decimal = 0;
+	float decimal_factor = 0.1f;
+	double val = 0.0;
+	char *ptr = p;
+	if (*ptr == '-') {
+		is_negative = 1;
+		ptr++;
+	}
+	while (*ptr != '\0') {
+		if (*ptr == '.') {
+			has_decimal = 1;
+			ptr++;
+			continue;
+		}
+		if (*ptr >= '0' && *ptr <= '9') {
+			if (!has_decimal) {
+				val = val * 10 + (*ptr - '0');
+			} else {
+				val += (*ptr - '0') * decimal_factor;
+				decimal_factor *= 0.1f;
+			}
+		} else { // 遇到非数字字符终止解析
+			break;
+		}
+		ptr++;
+	}
+	// 应用负号
+	if (is_negative) val = -val;
 }
 
 // 整数转字符串（十进制）
@@ -148,6 +180,23 @@ static inline char ARS_inw(uint16_t port) {
 	return rt;
 }
 
+//这两个函数虽然名字看似是类型转换
+//其实应该是将相同的内存块进行原封不动的抄写，并以不同形式（INT,FLOAT）读出来
+//而内存块的内容并没有改变
+//像float x=1.14;int y=x;就会改变因为类型转换而造成内存内容的不同
+float tranIntToFloat(int x) {
+	float result;
+	ARS_memmove(&result, &x, sizeof(int));  // 安全转换
+	return result;
+}
+
+int tranFloatToInt(float x) {
+	int result;
+	ARS_memmove(&result, &x, sizeof(float));  // 安全转换
+	return result;
+}
+
+
 //是否支持APM关机
 //检查是否支持APM关机的逻辑比ACPI简单不少
 //因此优先检查使用APM关机
@@ -184,7 +233,7 @@ void shutdown() {
 }
 
 // 带缓冲区的滚动函数
-static void scroll_with_buffer(volatile uint16_t *vram,uint8_t id,uint8_t direction) {
+static void scroll_with_buffer(volatile uint16_t *vram, uint8_t id, uint8_t direction) {
 	uint16_t screen_width = VGA_WIDTH;
 	uint16_t screen_height = VGA_HEIGHT;
 	// 计算可滚动行数（根据缓冲区内容）
@@ -199,7 +248,7 @@ static void scroll_with_buffer(volatile uint16_t *vram,uint8_t id,uint8_t direct
 		for (int i = 0; i < SCROLL_SIZE; i++) {
 			uint16_t src_offset = new_start + i * VGA_WIDTH;
 			uint16_t dst_offset = i * VGA_WIDTH;
-			ARS_memmove(&vram[dst_offset],&EXE_SCBUFF[id][src_offset],VGA_WIDTH * sizeof(uint16_t));
+			ARS_memmove(&vram[dst_offset], &EXE_SCBUFF[id][src_offset], VGA_WIDTH * sizeof(uint16_t));
 		}
 		cursor_pos -= SCROLL_SIZE * VGA_WIDTH;
 	} else if (direction == SCROLL_DOWN && current_line < max_line) {
@@ -212,7 +261,7 @@ static void scroll_with_buffer(volatile uint16_t *vram,uint8_t id,uint8_t direct
 		for (int i = 0; i < SCROLL_SIZE; i++) {
 			uint16_t src_offset = new_start + i * VGA_WIDTH;
 			uint16_t dst_offset = (screen_height - SCROLL_SIZE + i) * VGA_WIDTH;
-			ARS_memmove(&vram[dst_offset],&EXE_SCBUFF[id][src_offset],VGA_WIDTH * sizeof(uint16_t));
+			ARS_memmove(&vram[dst_offset], &EXE_SCBUFF[id][src_offset], VGA_WIDTH * sizeof(uint16_t));
 		}
 		cursor_pos += SCROLL_SIZE * VGA_WIDTH;
 	}
