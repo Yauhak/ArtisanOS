@@ -54,6 +54,11 @@ static OpHandler opcode_table[HLT + 1] = {
 	[HLT] = hlt
 };
 
+static OpHandler ex_opcode[EX_END + 1] = {
+	[BIT_AOX] = bit_and_or_xor,
+	[BIT_MOV] = bit_move
+};
+
 //输出一个字符
 //PCHR [地址或立即数]，无返回值
 int8_t pchr(uint8_t ParamType, int32_t *params, uint16_t taskId) {
@@ -74,11 +79,11 @@ int8_t pstr(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 	}
 }
 
-//输出数值（DOWRD，INT，FLOAT）
+//输出数值（INT，FLOAT）
 //PVAL [地址或立即数]，无返回值
 int8_t pval(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 	// 参数解析
-	uint8_t data_type = params[0];  // 0=DWORD, 1=INT, 2=FLOAT
+	uint8_t data_type = params[0];  //0=INT, 1=FLOAT
 	int32_t value;
 	float f_value;
 	// 根据 ParamType 获取数值
@@ -174,31 +179,7 @@ int8_t val_input(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 		if (current_char == '.') has_decimal = 1;
 	}
 	// 解析数值
-	char *ptr = inputBuf;
-	if (*ptr == '-') {
-		is_negative = 1;
-		ptr++;
-	}
-	while (*ptr != '\0') {
-		if (*ptr == '.') {
-			has_decimal = 1;
-			ptr++;
-			continue;
-		}
-		if (*ptr >= '0' && *ptr <= '9') {
-			if (!has_decimal) {
-				val = val * 10 + (*ptr - '0');
-			} else {
-				val += (*ptr - '0') * decimal_factor;
-				decimal_factor *= 0.1f;
-			}
-		} else { // 遇到非数字字符终止解析
-			break;
-		}
-		ptr++;
-	}
-	// 应用负号
-	if (is_negative) val = -val;
+	val = str_to_float(inputBuf);
 	// 类型转换与存储
 	switch (ParamType) {
 		case 0: { // INT (int32_t)
@@ -220,7 +201,8 @@ int8_t val_input(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 //读文件
 //READFILE [读取到的内存地址][文件名][大小（簇数）]
 int8_t _read_file(uint8_t ParamType, int32_t *params, uint16_t taskId) {
-	char nameBuff[256], i = 0;
+	char nameBuff[256];
+	int i = 0;
 	FindPhyMemOffByID(taskId, params[1]);
 	while (*CurPhyMem) {
 		nameBuff[i++] = findByteWithAddr(taskId);
@@ -241,7 +223,8 @@ int8_t _read_file(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 //写文件
 //WRITEFILE [写入文件的字符串内存地址][文件名][大小（字节）]
 int8_t _write_file(uint8_t ParamType, int32_t *params, uint16_t taskId) {
-	char nameBuff[256], i = 0;
+	char nameBuff[256];
+	int i = 0;
 	FindPhyMemOffByID(taskId, params[0]);
 	while (*CurPhyMem) {
 		nameBuff[i++] = findByteWithAddr(taskId);
@@ -261,7 +244,8 @@ int8_t _write_file(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 //删除文件
 //DEL_FILE [文件名字符串地址]
 int8_t _del_file(uint8_t ParamType, int32_t *params, uint16_t taskId) {
-	char nameBuff[256], i = 0;
+	char nameBuff[256];
+	int i = 0;
 	FindPhyMemOffByID(taskId, params[0]);
 	while (*CurPhyMem) {
 		nameBuff[i++] = findByteWithAddr(taskId);
@@ -324,6 +308,7 @@ int8_t invoke_array(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 		index = findIntWithAddr(taskId);
 	}
 	FindPhyMemOffByID(taskId, params[1]);
+	CurPhyMem[taskId] += index;
 	switch (ivk_type) {
 		case 0:
 			CalcResu[taskId] = findByteWithAddr(taskId);
@@ -353,7 +338,7 @@ int8_t push(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 	if (ParamType == 0) {
 		setByte((int8_t)CalcResu[taskId], taskId);
 		//保存为INT？我不知道四字节的变量怎么称呼
-	} else if (ParamType == 2) {
+	} else if (ParamType == 1) {
 		setInt((int32_t)CalcResu[taskId], taskId);
 	} else {
 		setFloat((float)CalcResu[taskId], taskId);
@@ -401,7 +386,7 @@ int8_t call(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 	int32_t CurAddrOfMemPtr = (volatile int32_t)(int8_t *)CurPhyMem[taskId];
 	int32_t CurAddrOfCmd = (volatile int32_t)(int8_t *)CurCmd[taskId];
 	//程序命令指针指向参数所表示的地址
-	CurCmd[taskId] = (volatile uint8_t *)params[0];
+	CurCmd[taskId] = (volatile uint8_t *)(uint32_t)params[0];
 	//前四个字节代表运行所需内存总大小（包括行参）
 	//这个值在编译过程中确定
 	volatile uint32_t ReqMemSize = *(volatile uint32_t *)CurCmd[taskId];
@@ -466,8 +451,8 @@ int8_t conds(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 	// 后三个字节共同代表参数的一些性质
 	uint8_t ParamType = cmdAndPmTp & 0x07;
 	// 解析参数类型和数据大小
-	uint8_t dataSize = params[0]; // 新增参数：1=BYTE, 2=DWORD, 4=INT/FLOAT
-	if (dataSize != 1 && dataSize != 2 && dataSize != 4) {
+	uint8_t dataSize = params[0]; // 新增参数：1=BYTE, 4=INT/FLOAT
+	if (dataSize != 1 && dataSize != 4) {
 		return -1; // 非法数据大小
 	}
 	//用double来覆盖所有类型最大可表示的值
@@ -574,8 +559,10 @@ int8_t calc(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 		}
 		// 将结果转换为 int32_t 存入 CalcResu（需确保内存对齐）
 		ARS_memmove(&CalcResu[taskId], &result_f, sizeof(float));
-		FindPhyMemOffByID(taskId, params[0]);
-		setFloat(result_f, taskId);
+		if (ParamType) {
+			FindPhyMemOffByID(taskId, params[0]);
+			setFloat(result_f, taskId);
+		}
 	} else {
 		// 原有整数运算逻辑（略作调整）
 		if (ParamType == 0) {
@@ -607,8 +594,10 @@ int8_t calc(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
 				break;
 		}
 		CalcResu[taskId] = result_i;
-		FindPhyMemOffByID(taskId, params[0]);
-		setInt(result_i, taskId);
+		if (ParamType) {
+			FindPhyMemOffByID(taskId, params[0]);
+			setInt(result_i, taskId);
+		}
 	}
 }
 
@@ -650,7 +639,7 @@ int8_t menu_show(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 			choice = (choice <= menu_obj.menu_len - 1) ? choice + 1 : menu_obj.menu_len - 1;
 		}
 	}
-	uint32_t act = menu_obj.action[choice];
+	int32_t act = menu_obj.action[choice];
 	call(0, &act, taskId);
 }
 
@@ -658,17 +647,84 @@ int8_t hlt(uint8_t ParamType, int32_t *params, uint16_t taskId) {
 	return 1;
 }
 
+int8_t bit_and_or_xor(uint8_t ParamType, int32_t *params, uint16_t taskId) {
+	int32_t val1_i, val2_i;
+	if (ParamType == 0) {
+		val1_i = params[1];
+		val2_i = params[2];
+	} else if (ParamType == 1) {
+		FindPhyMemOffByID(taskId, params[1]);
+		val1_i = findIntWithAddr(taskId);
+		val2_i = params[2];
+	} else if (ParamType == 2) {
+		FindPhyMemOffByID(taskId, params[1]);
+		val1_i = findIntWithAddr(taskId);
+		FindPhyMemOffByID(taskId, params[2]);
+		val2_i = findIntWithAddr(taskId);
+	}
+	switch (params[0]) {
+		case 1:
+			val1_i &= val2_i;
+			break;
+		case 2:
+			val1_i |= val2_i;
+			break;
+		case 3:
+			val1_i ^= val2_i;
+			break;
+	}
+	if (ParamType) {
+		FindPhyMemOffByID(taskId, params[1]);
+		setInt(val1_i, taskId);
+	}
+}
+
+int8_t bit_move(uint8_t ParamType, int32_t *params, uint16_t taskId) {
+	int32_t val1_i, val2_i;
+	uint8_t operate = (ParamType & 0x04) >> 2;
+	ParamType &= 0x03;
+	if (ParamType == 0) {
+		val1_i = params[0];
+		val2_i = params[1];
+	} else if (ParamType == 1) {
+		FindPhyMemOffByID(taskId, params[0]);
+		val1_i = findIntWithAddr(taskId);
+		val2_i = params[1];
+	} else if (ParamType == 2) {
+		FindPhyMemOffByID(taskId, params[0]);
+		val1_i = findIntWithAddr(taskId);
+		FindPhyMemOffByID(taskId, params[1]);
+		val2_i = findIntWithAddr(taskId);
+	}
+	switch (operate) {
+		case 0:
+			val1_i <<= val2_i;
+			break;
+		case 1:
+			val1_i >>= val2_i;
+			break;
+	}
+	if (ParamType) {
+		FindPhyMemOffByID(taskId, params[0]);
+		setInt(val1_i, taskId);
+	}
+}
+
 //注意！！
 //params并不代表它一定表示的是int类型
 //可能是与float类型共用相同的四字节内存
-int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId) {
+int8_t interprete(uint8_t cmdAndPmTp, int32_t *params, uint16_t taskId, uint8_t is_ex_op) {
 	// 前五个字节代表命令
 	uint8_t cmd = cmdAndPmTp >> 3;
 	// 后三个字节共同代表参数的一些性质
 	uint8_t ParamType = cmdAndPmTp & 0x07;
-	if (!((cmd >= EQ && cmd <= NE) && (cmd >= ADD && cmd <= DIV))) {
-		opcode_table[cmd](ParamType, params, taskId);
+	if (is_ex_op) {
+		if (!((cmd >= EQ && cmd <= NE) && (cmd >= ADD && cmd <= DIV))) {
+			opcode_table[cmd](ParamType, params, taskId);
+		} else {
+			opcode_table[cmd](cmdAndPmTp, params, taskId);
+		}
 	} else {
-		opcode_table[cmd](cmdAndPmTp, params, taskId);
+		ex_opcode[cmd](ParamType, params, taskId);
 	}
 }
