@@ -331,7 +331,7 @@ static uint16_t get_next_cluster(uint16_t cluster) {
 uint16_t find_file(const char *path) {
 	char *token;
 	char temp_path[256];
-	ARS_memmove(temp_path, path, ARS_strlen(path));
+	ARS_memmove(temp_path, path, ARS_strlen((uint8_t *)path));
 	uint16_t current_cluster = 0; // 0 表示从根目录开始
 	struct DirEntry *entry;
 	token = ARS_strtok(temp_path, '\\');
@@ -359,7 +359,20 @@ void del_file(const char *path) {
 		entry = find_entry_in_directory(current_cluster, token);
 		token = ARS_strtok(token + ARS_strlen(token), '\\');
 	}
+	uint16_t cluster = entry->first_cluster;
+	ARS_memset(entry,0,sizeof(struct DirEntry));
 	entry->filename[0] == 0xE5;//标记条目删除
+	while (cluster < FAT_END_CLUSTER) {
+		if (cluster & 1) {
+			g_fat[cluster] &= 0x0F;
+			g_fat[cluster + 1] = 0;
+		} else {
+			g_fat[cluster] = 0;
+			g_fat[cluster + 1] &= 0xF0;
+		}
+		cluster = get_next_cluster(cluster);
+	}
+	flush_fat();
 }
 
 // 在指定目录簇中查找条目
