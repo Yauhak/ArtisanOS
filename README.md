@@ -130,7 +130,7 @@ main
 ```
 
 将其编译为 ArtisanOS 支持的字节码后加载运行。
-PS.最初版本的ARSLanguage编译器主啵是打算拿py写
+PS.最初ARSLanguage的编译器主啵是打算拿py写
    之后再写一个操作系统内置版本的
 
 ---
@@ -148,6 +148,7 @@ PS.最初版本的ARSLanguage编译器主啵是打算拿py写
 4.29   改写原有代码架构，将内存管理部分和字节码虚拟机部分分隔成不同文件；改写了INTERPERTER.c中interprete函数庞大的switch case结构，
        引入字节码-函数映射表
 4.30   虚拟机抛弃DWORD类型（即C语言中的short类型）
+5.1    引入ARSLanguage编译器（主啵想了想，还是打算实现一个配套操作系统的编译器）
 ```
 
 ---
