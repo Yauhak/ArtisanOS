@@ -5,9 +5,12 @@ fn delay_ms
 		$start I 0
 		$mid I 0
 	end_mem
-	timer $start
+	;2号ABI为系统时钟
+	abi_invoke 2
+	push I $start
 	lb loop
-		timer $now
+		abi_invoke 2
+		push I $now
 		sub I $now $start
 		push I $mid
 		ge I $mid $len
@@ -16,28 +19,39 @@ fn delay_ms
 	lb finish
 		ret
 endfn
-		
+
 main
 	mem
 		$delay I 0
+		$count I 0
+		$ele I 0
+		$array I 2
 	end_mem
 	mov I $delay 100
+	mov I $count 0
+	;三个LED分别接在18、19、20号引脚上
+	init_array I $array 3 18 19 20
 	lb loop_main
-		gpio_write 18 1
+		;依次点亮当前LED
+		read_array I $array $count
+		push I $ele
+		pushp I $ele
+		pushp I 1
+		;0号ABI为digitalWrite
+		abi_invoke 0
 		pushp I $delay
 		call delay_ms
-		gpio_write 18 0
-
-		gpio_write 19 1
-		pushp I $delay
-		call delay_ms
-		gpio_write 19 0
-
-		gpio_write 20 1
-		pushp I $delay
-		call delay_ms
-		gpio_write 20 0
-
+		pushp I $ele
+		pushp I 0
+		abi_invoke 0
+		;切换到下一个LED，越界则回到第一个
+		add I $count 1
+		push I $count
+		gt I $count 2
+		jmp_t clean
+	jmp loop_main
+	lb clean
+		mov I $count 0
 	jmp loop_main
 	hlt
-endmain
+	endmain
