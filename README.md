@@ -166,22 +166,22 @@ ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_inv
 ```
 ArtisanOS/
 ├── Core/
-│   └── main/
-│       ├── main.ino          # 【平台相关】入口：装载任务 + 指令调度器
-│       ├── INTERPRETER.cpp/.h# 指令实现与 opcode 分发表（平台无关）
-│       ├── Memory.cpp/.h     # 运行内存管理：分配/释放/合并（平台无关）
-│       ├── IO_INCLUDE.cpp/.h # 基础类型、Opcode 枚举、内存工具函数（平台无关）
-│       ├── Glue.h            # 【平台相关】ABI 胶水层，用户扩展点
-│       └── ByteCode.h        # 内置程序的字节码数组（平台无关）
+│   ├── main.ino
+│   ├── INTERPRETER.cpp/.h
+│   ├── Memory.cpp/.h
+│   ├── IO_INCLUDE.cpp/.h
+│   ├── Glue.h
+│   └── ByteCode.h
 ├── Compiler/
-│   ├── Compiler.c/.h         # ARS 编译器（纯 C，平台无关）
-│   ├── LEDFlash.txt          # 示例：光敏电阻控制 LED
-│   ├── LEDStream.txt         # 示例：流水灯
-│   ├── recursion.txt         # 示例：递归 / 子程序调用
-│   ├── array.txt             # 示例：数组读写
-│   └── *.ars_bin             # 编译产物
-├── ARSIDE.html               # 单文件网页 IDE（同一套编译逻辑的 JS 版 + 语法高亮）
-└── README.md
+│   ├── Demo/
+│   │   ├── LEDFlash.txt
+│   │   ├── LEDStream.txt
+│   │   └── recursionTest.txt
+│   └── Source/
+│       ├── ARSIDE.html
+│       └── Compiler.c/.h
+├── README.md
+└── LICENSE
 ```
 
 ---
