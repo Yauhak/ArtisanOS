@@ -105,6 +105,16 @@ ars_i8 mov(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 }
 
 //INIT_ARRAY [array] [count] [[1-byte tag(addr/imm)][param]...]
+/*
+	CurCmd 的推进（与调度器约定一致，务必保持）：
+		进入本函数时，调度器只越过并消费了操作码字节（+1）
+		由于本函数会把 CurCmd 直接指向"变长初始化表"，
+		调度器看到 needJump 后【不会】再补加参数长度
+		所以这里必须自己越过 2 个固定参数（数组偏移、元素个数）
+		随后循环逐项解析变长表，把 CurCmd 带到本条指令之后
+	若漏掉这个 +2*sizeof(ars_i32)，CurCmd 会停在固定参数中间，
+	变长表被当成指令解析，其后的整个指令流随之错位，程序必然跑飞
+*/
 ars_i8 init_array(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 	needJump[taskId] = 1;
 	CurCmd[taskId] += 2 * sizeof(ars_i32);
@@ -393,7 +403,9 @@ ars_i8 ipc_send(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 
 //读取（自己的）IPC信息
 ars_i8 ipc_recv(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
-	ars_i32 recv;
+	//必须先置初值：没有消息时 recv 原本保持未初始化状态
+	//会把栈上的随机值写进程序内存，属于难以复现的内存污染
+	ars_i32 recv = 0;
 	if (Msgs[taskId].flag) {
 		recv = Msgs[taskId].content;
 		Msgs[taskId].flag = 0;
@@ -411,6 +423,14 @@ ars_i8 ipc_recv(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 ars_i8 pushp(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 	uars_i8 p = ParamType & 0x01;
 	ParamType = (ParamType & 0x06) >> 1;
+	//越界防护必须在写入之前进行
+	//原先的检查放在写入之后，一旦 IndexOfSPS 到达上限，写入已经越过了 Stack，
+	//会直接踩坏相邻任务（OS_MAX_TASK 个任务的 Stack 是连续排列的）的参数栈
+	//这里按"本次还要写入几字节"预留空间，写不下就整体拒绝
+	uars_i8 need = (ParamType == 0) ? 1 : 4;
+	if ((uars_i16)IndexOfSPS[taskId] + need > OS_MAX_PARAM) {
+		return OUT_PARAM_BOUND;
+	}
 	//指令参数为立即数
 	if (p == 0) {
 		//0:Byte;1:Int;2:Float
@@ -443,21 +463,27 @@ ars_i8 pushp(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 			IndexOfSPS[taskId] += 4;
 		}
 	}
-	if (IndexOfSPS[taskId] >= OS_MAX_PARAM) {
-		return OUT_PARAM_BOUND;
-	}
+	return 0;
 }
 
 //调用子程序
 //CALL [子程序编号，在编译过程中确定]
+/*
+	返回地址的保存位置必须与调度器的推进保持一致：
+	CALL 指令在字节码中占 1 + 4 = 5 字节（1字节操作码 + 4字节程序入口偏移）
+	进入本函数时调度器已经消费掉操作码，CurCmd 正指向那 4 字节入口偏移，
+	因此"下一条指令"的偏移是 CurCmd - base + 4
+	若这里少加了这 4 字节，保存下来的返回地址会落在 CALL 参数的中间，
+	RET 之后就会从一条指令的中间继续执行，整个指令流随之错位
+	（这正是"循环中反复调用子程序"的流水灯/闪烁灯程序会跑飞的原因）
+*/
 ars_i8 call(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 	needJump[taskId] = 1;
 	//内存层级+1
 	MemLevel[taskId]++;
-	//保存上下文数据
+	//保存上下文数据：跳过 CALL 自己的 4 字节入口偏移，指向下一条指令
 	//在rp2040这种32位环境下指针大小为4，与int大小一致
-	//uars_i32 CurAddrOfMemPtr = CurPhyMem[taskId] - OS_PHY_MEM_START;
-	uars_i32 CurAddrOfCmd = CurCmd[taskId] - OS_EXE_LOAD_START(taskId);
+	uars_i32 CurAddrOfCmd = CurCmd[taskId] - OS_EXE_LOAD_START(taskId) + sizeof(ars_i32);
 	//程序命令指针指向参数所表示的地址
 	uars_i32 tmpCurCmd = (uars_i32)params[0];
 	//前四个字节代表运行所需内存总大小（包括形参）
@@ -475,13 +501,14 @@ ars_i8 call(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 	//压入上下文数据
 	ARS_memset((void *)CurPhyMem[taskId], &CurAddrOfCmd, 4);
 	CurPhyMem[taskId] += sizeof(ars_i32);
-	//压入参数
-	ARS_memset(CurPhyMem, Stack[taskId], IndexOfSPS[taskId]);
+	//压入参数（注意这里是 CurPhyMem[taskId]，即已经越过魔术字头和上下文的首地址）
+	ARS_memset(CurPhyMem[taskId], Stack[taskId], IndexOfSPS[taskId]);
 	//销毁参数栈的形参
 	for (int j = 0; j < IndexOfSPS[taskId]; j++) {
 		Stack[taskId][j] = 0;
 	}
 	IndexOfSPS[taskId] = 0;
+	return 0;
 }
 
 //子程序返回上文
@@ -724,14 +751,25 @@ ars_i8 bit_move(uars_i8 ParamType, ars_i32 *params, uars_i16 taskId) {
 //注意！！
 //params并不代表它一定表示的是int类型
 //可能是与float类型共用相同的四字节内存
+//
+//关于 CurCmd 的推进约定（非常重要）：
+//	操作码本身只占 1 字节，紧跟在它后面的是若干个 4 字节参数
+//	调度器（main.ino 的 loop）已经越过操作码字节后才把 params 交给本函数
+//	所以本函数只负责"再越过参数"，即各处理函数自行跳转时按 1 + 4*参数个数 推进
+//	一旦这里多算或少算 1 字节，后续所有指令都会整体错位
 ars_i8 interprete(uars_i8 cmdAndPmTp, ars_i32 *params, uars_i16 taskId) {
 	//前五个字节代表命令
 	uars_i8 cmd = cmdAndPmTp >> 3;
 	//后三个字节共同代表参数的一些性质
 	uars_i8 ParamType = cmdAndPmTp & 0x07;
+	//非法操作码防护：防止越界访问 opcode_table
+	//（损坏的字节码、被踩踏的程序内存都可能产生 >= HLT+1 的操作码）
+	if (cmd > HLT) {
+		return INVALID_INPUT;
+	}
 	if (!((cmd >= ADD && cmd <= NE) || cmd == SETARRAY || cmd == READARRAY)) {
-		opcode_table[cmd](ParamType, params, taskId);
+		return opcode_table[cmd](ParamType, params, taskId);
 	} else {
-		opcode_table[cmd](cmdAndPmTp, params, taskId);
+		return opcode_table[cmd](cmdAndPmTp, params, taskId);
 	}
 }
