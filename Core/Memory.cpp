@@ -347,8 +347,12 @@ int findFreeMemById(uars_i8 id, int allocLen, int level) {
 		while (M2 < (uars_i8 *)LastMEM && M2) {
 			//发现空闲的魔术字
 			if (!ARS_strcmp((const char *)M2, FREE, 4)) {
-				//若该块空闲内存大小大于需求大小
-				if (((Magic *)M2)->len > TTL) {
+				//若该块空闲内存大小不小于需求大小
+				//注意：此处必须是 >= 而不是 >
+				//释放的子程序块长度恰好等于 TTL 时（这在“固定大小子程序反复调用”的
+				//场景中是最常见的情况），用 > 会跳过该空闲块，导致内存分配不断向后
+				//“抬升”，最终耗尽 OS_MAX_MEM 并使程序报 OUT_BOUND 而停摆
+				if (((Magic *)M2)->len >= TTL) {
 					//如果该空闲块内存比总需求大不足50B，则将该内存块全部分给请求
 					if (((Magic *)M2)->len - TTL < 50) {
 						//判断该块空闲内存在链表中的位置情况
