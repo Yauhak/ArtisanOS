@@ -1,34 +1,34 @@
-fn delay_ms
-	mem
-		$len I 0
-		$now I 0
-		$start I 0
-		$mid I 0
-	end_mem
-	timer $start
-	lb loop
-		timer $now
-		sub I $now $start
-		push I $mid
-		ge I $mid $len
-		jmp_t finish
-	jmp loop
-	lb finish
-		ret
-endfn
-		
+;光敏电阻传感器控制LED
+;13号引脚读取光敏电阻模块的DO（数字量输出）
+;6号引脚接LED
+;DO为1（检测到光线变化）时LED点亮，否则熄灭
 main
 	mem
-		$pio I 0
+		$sensor I 0
+		$val I 0
 	end_mem
-	mov I $pio 6
-	lb loop_main
-		gpio_write $pio 1
-		pushp I 100 
-		call delay_ms
-		gpio_write $pio 0
-		pushp I 100 
-		call delay_ms
-	jmp loop_main
+	mov I $sensor 13
+	mov I $val 0
+	lb loop
+		;--- 读取光敏电阻DO ---
+		;1号ABI为digitalRead，结果通过CalcResu返回
+		pushp I $sensor
+		abi_invoke 1
+		push I $val
+		;--- 判断DO是否为1 ---
+		eq I $val 1
+		jmp_t led_on
+		;DO为0：熄灭LED
+		pushp I 6
+		pushp I 0
+		;0号ABI为digitalWrite
+		abi_invoke 0
+		jmp loop
+		lb led_on
+			;DO为1：点亮LED
+			pushp I 6
+			pushp I 1
+			abi_invoke 0
+	jmp loop
 	hlt
 endmain
