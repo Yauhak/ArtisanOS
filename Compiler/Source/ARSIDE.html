@@ -959,13 +959,16 @@
             if (resultToken === 'main' || resultToken === 'fn') {
                 let isMain = (resultToken === 'main');
                 if (isMain) {
+                    //main 也按"函数"布局：先留出 4 字节的变量区大小字段，
+                    //其后的 4 字节才是 main 的第一条指令
+                    //这样 call() 的"头部 + 4 = 第一条指令"规则对 main 同样成立
                     entryPoint = ptr;
                     codePool[0] = entryPoint & 0xFF;
                     codePool[1] = (entryPoint >> 8) & 0xFF;
                     codePool[2] = (entryPoint >> 16) & 0xFF;
                     codePool[3] = (entryPoint >> 24) & 0xFF;
                     currentFuncName = 'main';
-                    logInfo(`main 入口地址: ${entryPoint}`);
+                    logInfo(`main 头部地址: ${entryPoint}（首条指令在 ${entryPoint + 4}）`);
                 } else {
                     i = readToken(s, i); i = skipBlank(s, i);
                     let fname = resultToken;
