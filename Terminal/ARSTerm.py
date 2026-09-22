@@ -26,6 +26,7 @@ import os
 import re
 import random
 import sys
+import time
 
 try:
     import serial
@@ -37,14 +38,35 @@ PROMPT = "arsfs> "
 MAX_CHUNK = 128
 FILE_MAX = 2048
 TIMEOUT = 3.0
+# 固定的小超时：read_line 只靠"截止时间"控制超时，绝不再中途改 ser.timeout。
+# 在 Windows 上给 pyserial 赋 timeout 会触发一次 SetCommState，而 CDC 那边只要
+# 还有一次写没落地，SetCommState 就会以 ERROR_SEM_TIMEOUT(121) 失败——
+# 表现就是"上传到一半串口炸了、每次错得还不一样"。所有读都固定用它。
+POLL_TIMEOUT = 0.02
 
 
 class ArsfsTerm:
     def __init__(self, port, baud=115200):
-        self.ser = serial.Serial(port, baud, timeout=0.2)
+        self.ser = serial.Serial(port, baud, timeout=POLL_TIMEOUT)
+        time.sleep(0.2)
+        self.drain()
         self.buf = b""
 
     # ---------- 低层收发 ----------
+    def drain(self, quiet=0.05, limit=1.5):
+        """把接收缓冲读干净（上一次没读完的应答、被中断的操作留下的数据）。
+
+        每条命令之前都做一次：只要有一点点残留在缓冲里，`read_line` 就会读到
+        **上一条命令的应答**，之后每条命令都错开一位——症状是"每次报的错都不一样"。
+        """
+        t_end = time.time() + limit
+        last = time.time()
+        while time.time() < t_end:
+            if self.ser.read(4096):
+                last = time.time()
+            elif time.time() - last >= quiet:
+                break
+
     def write_line(self, s: str):
         self.ser.write(s.encode() + b"\n")
         self.ser.flush()
@@ -52,41 +74,49 @@ class ArsfsTerm:
     def read_line(self, timeout=TIMEOUT):
         """按行读，返回去掉行尾的字符串；超时返回 None。"""
         line = b""
-        deadline = self.ser.timeout
-        self.ser.timeout = 0.2
-        waited = 0.0
-        while True:
+        t_end = time.time() + timeout
+        while time.time() < t_end:
             ch = self.ser.read(1)
-            if ch:
-                if ch in (b"\n", b"\r"):
-                    if line:
-                        self.ser.timeout = deadline
-                        return line.decode(errors="replace")
-                    continue
-                line += ch
-            else:
-                waited += 0.2
-                if waited >= timeout:
-                    self.ser.timeout = deadline
-                    return None
+            if not ch:
+                continue
+            if ch in (b"\n", b"\r"):
+                if line:
+                    return line.decode(errors="replace")
+                continue
+            line += ch
+        return None
+
+    def wait_for(self, prefixes, timeout=5.0, quiet_report=True):
+        """等到一条以 prefixes 里任一前缀开头的应答；路上的杂音跳过并报告。
+
+        返回 (命中行, 跳过的行列表)；超时返回 (None, 跳过的行)。
+        """
+        skipped = []
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            l = self.read_line(1.5)
+            if l is None:
+                break
+            if any(l.startswith(p) for p in prefixes):
+                return l, skipped
+            skipped.append(l)
+            if quiet_report and len(skipped) <= 5:
+                print("  (跳过 " + l + ")")
+        return None, skipped
 
     def read_exact(self, n, timeout=TIMEOUT):
+        """读满 n 字节（或超时）。同样不改 ser.timeout。"""
         got = b""
-        waited = 0.0
-        old = self.ser.timeout
-        self.ser.timeout = 0.2
-        while len(got) < n and waited < timeout:
+        t_end = time.time() + timeout
+        while len(got) < n and time.time() < t_end:
             chunk = self.ser.read(n - len(got))
             if chunk:
                 got += chunk
-                waited = 0.0
-            else:
-                waited += 0.2
-        self.ser.timeout = old
         return got
 
     # ---------- 命令 ----------
     def cmd_ls(self):
+        self.drain()
         self.write_line("ls")
         while True:
             line = self.read_line()
@@ -100,6 +130,7 @@ class ArsfsTerm:
             print("  " + line)
 
     def cmd_occ(self, extra=""):
+        self.drain()
         self.write_line(("occ " + extra).strip())
         color = False
         while True:
@@ -129,11 +160,13 @@ class ArsfsTerm:
             print("  " + out + "\x1b[0m")
 
     def cmd_ver(self):
+        self.drain()
         self.write_line("ver")
         print("  " + (self.read_line() or "超时"))
 
     def cmd_reboot(self, line):
         """把整行原样发过去（reboot <name> 或 reboot_all）"""
+        self.drain()
         self.write_line(line)
         print("  " + (self.read_line() or "超时"))
 
@@ -141,10 +174,12 @@ class ArsfsTerm:
         if input("  确认恢复出厂设置？会清空所有文件 (y/N): ").strip().lower() != "y":
             print("  已取消")
             return
+        self.drain()
         self.write_line("format")
         print("  " + (self.read_line(15.0) or "超时"))
 
     def cmd_del(self, name):
+        self.drain()
         self.write_line(f"del {name}")
         line = self.read_line()
         print("  " + (line or "超时"))
@@ -157,46 +192,63 @@ class ArsfsTerm:
         if len(data) > FILE_MAX:
             print(f"  文件过大（{len(data)} > {FILE_MAX} 字节）")
             return
+        self.drain()
         self.write_line(f"update {dest} {len(data)}")
-        line = self.read_line()
+        # 等 RDY：万一前面还有半条应答没读完，这里把杂音跳过去，不要直接判失败
+        line, _ = self.wait_for(["RDY", "ERR"], timeout=3.0)
         if line != "RDY":
             print("  设备未就绪：" + str(line))
+            self.drain()
             return
         sent = 0
         while sent < len(data):
             chunk = data[sent:sent + MAX_CHUNK]
             self.ser.write(chunk)
             self.ser.flush()
-            ack = self.read_line()
-            if ack is None or not ack.startswith("ACK"):
-                print("  传输中断：" + str(ack))
+            ack, _ = self.wait_for(["ACK", "ERR"], timeout=6.0)
+            if ack is None:
+                print("\n  传输中断：没等到 ACK（宿主这头卡过 5 秒以上）。")
+                print("  已清空接收缓冲，重新发一次 command 即可。")
+                self.drain(quiet=0.3)
+                return
+            if ack.startswith("ERR"):
+                print("\n  " + ack)
+                self.drain(quiet=0.3)
                 return
             sent += len(chunk)
             print(f"\r  已发送 {sent}/{len(data)} 字节", end="", flush=True)
         print()
-        result = self.read_line()
+        # 落盘结果：OK / ERR write
+        result, _ = self.wait_for(["OK", "ERR"], timeout=10.0)
         print("  " + (result or "超时"))
+        if result is None:
+            self.drain(quiet=0.3)
 
     def cmd_get(self, name):
+        self.drain()
         self.write_line(f"get {name}")
         line = self.read_line()
         if line is None or not line.startswith("DATA"):
             print("  下载失败：" + str(line))
+            self.drain()
             return
         try:
             n = int(line.split()[1])
         except (IndexError, ValueError):
             print("  应答格式错误：" + line)
+            self.drain()
             return
-        # 读回 n 个字节的 HEX 文本（设备每 32 字节换一次行）
+        # 读回 n 个字节的 HEX 文本（设备每 32 字节换一次行），读到 OK 为止
         hexbuf = ""
-        while len(hexbuf) < n * 2:
-            chunk = self.read_exact(64)
-            if not chunk:
+        t0 = time.time()
+        while len(hexbuf) < n * 2 and time.time() - t0 < 20:
+            l = self.read_line(2.0)
+            if l is None or l == "OK":
                 break
-            hexbuf += "".join(ch for ch in chunk.decode(errors="replace") if ch in "0123456789abcdefABCDEF")
+            hexbuf += "".join(ch for ch in l if ch in "0123456789abcdefABCDEF")
         if len(hexbuf) < n * 2:
             print("  数据不完整，已接收 %d/%d 字节" % (len(hexbuf) // 2, n))
+            self.drain(quiet=0.3)
         raw = bytes.fromhex(hexbuf[: n * 2])
         fname = f"{random.randint(0, 0xFFFFFFFF):08X}.txt"
         with open(fname, "w", encoding="utf-8") as f:
@@ -248,6 +300,9 @@ def main():
         term = ArsfsTerm(port, baud)
     except serial.SerialException as e:
         print("打开串口失败：" + str(e))
+        print("  · 串口是独占的：Arduino IDE 的串口监视器、别的终端只要开着，这边就打不开。")
+        print("    请确认 IDE 的串口监视器已关闭（关了它会自己重启，要连 IDE 一起关）。")
+        print("  · 板子如果刚从 BOOTSEL 模式回来，等 2 秒再试。")
         return
 
     print(f"已连接 {port} @ {baud}，输入 help 查看命令。")
@@ -256,7 +311,12 @@ def main():
     while True:
         try:
             line = input(PROMPT).strip()
-        except (EOFError, KeyboardInterrupt):
+        except KeyboardInterrupt:
+            # 中途 Ctrl-C 很容易把一条应答读一半，读干净再继续，否则后面全错位
+            print("\n  (已中断，清空接收缓冲)")
+            term.drain(quiet=0.4)
+            continue
+        except EOFError:
             print()
             break
         if not line:
