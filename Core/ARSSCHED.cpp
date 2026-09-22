@@ -102,8 +102,23 @@ void arssched_loop(void) {
 	tid = (tid + 1) % OS_MAX_TASK;
 }
 
+/* 串口改过文件之后标记一下：下一轮 loop() 会重新装载。
+ * 只由上位机的命令触发，不走字节码的 ABI —— 否则程序写个文件就把自己给重置了。 */
+static uars_i8 schedDirty = 0;
+
+void arssched_touch(void) { schedDirty = 1; }
+
+void arssched_service(void) {
+	if (!schedDirty) return;
+	schedDirty = 0;
+	init_mem_info();  /* 停掉所有旧任务，并把它们占的堆整块作废 */
+	arssched_load();
+}
+
 #else
 uars_i8 gSchedTasks = 0;
 ars_i8 arssched_load(void) { return 0; }
 void arssched_loop(void) { }
+void arssched_touch(void) { }
+void arssched_service(void) { }
 #endif
