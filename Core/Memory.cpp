@@ -27,6 +27,12 @@ volatile uars_i8 *CurPhyMem[OS_MAX_TASK];                          //“安全�
 //然后在调用时基于此进行内存分配
 
 void init_mem_info() {
+	//把空闲链表和"已分配水位"也一起复位，这样它才是真正的"重置内存管理器"：
+	//热更新（重新装载调度表）时旧任务占的块必须全部作废，
+	//否则残留的 FREE 块会和新分配出去的块重叠。
+	FreeHead = 0;
+	FreeTail = 0;
+	LastMEM = (volatile uars_i8 *)OS_PHY_MEM_START;
 	for (int i = 0; i < OS_MAX_TASK; i++) {
 		MemHead[i] = 0;
 		MemTail[i] = 0;
