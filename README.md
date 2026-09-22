@@ -181,8 +181,6 @@ ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_inv
 
 ## 目录结构 | Project Structure
 
-## 目录结构 | Project Structure
-
 ```
 ArtisanOS/
 ├── Core/
@@ -813,8 +811,63 @@ endmain
 流水灯（`Compiler/Demo/LEDStream.txt`，编译后 210 字节）演示了子程序延时、数组保存引脚号与循环取模：
 
 ```
-	pushp I $delay
-	call delay_ms
+fn delay_ms
+	mem
+		$len I 0
+		$now I 0
+		$start I 0
+		$mid I 0
+	end_mem
+	;2号ABI为系统时钟
+	abi_invoke 2
+	push I $start
+	lb loop
+		abi_invoke 2
+		push I $now
+		sub I $now $start
+		push I $mid
+		ge I $mid $len
+		jmp_t finish
+	jmp loop
+	lb finish
+		ret
+endfn
+
+main
+	mem
+		$delay I 0
+		$count I 0
+		$ele I 0
+		$array I 2
+	end_mem
+	mov I $delay 100
+	mov I $count 0
+	;三个LED分别接在18、19、20号引脚上
+	init_array I $array 3 18 19 20
+	lb loop_main
+		;依次点亮当前LED
+		read_array I $array $count
+		push I $ele
+		pushp I $ele
+		pushp I 1
+		;0号ABI为digitalWrite
+		abi_invoke 0
+		pushp I $delay
+		call delay_ms
+		pushp I $ele
+		pushp I 0
+		abi_invoke 0
+		;切换到下一个LED，越界则回到第一个
+		add I $count 1
+		push I $count
+		gt I $count 2
+		jmp_t clean
+	jmp loop_main
+	lb clean
+		mov I $count 0
+	jmp loop_main
+	hlt
+	endmain
 ```
 
 更多样例见 `Compiler/Demo/` 目录。
@@ -837,24 +890,22 @@ endmain
 4. **`ars_i8` 是显式 `signed char`。** 某些 Arduino 核心（mbed）带 `-funsigned-char`，
    裸 `char` 会让同一份字节码在设备上跑出与宿主不同的结果；显式写出符号性后，
    移植到任何平台语义都相同。
-5. **`arsfs_hw_*` 的桌面替身必须照实模拟擦除态 `0xFF`。** 把 RAM 替身的初值设成 0，
-   会让"忘了清零位图"这类 bug 在 PC 上永远测不出来。
-6. **"先擦后写"的擦除粒度是扇区，不是页。** 让多个文件共用一个扇区，就等于让它们
+5. **"先擦后写"的擦除粒度是扇区，不是页。** 让多个文件共用一个扇区，就等于让它们
    共享一次"擦掉再写回"的窗口——窗口里断一次电，同扇区所有人的数据一起没。
    症状是"上传一个文件，结果另外几个文件变成空的"，离病因非常远。
    这一版为了简单**直接接受了这个风险**（首次适配分配，见上文「分配策略与风险」）。
-7. **mbed 核心的 `USBCDC` 输出有两个坑。**
+6. **mbed 核心的 `USBCDC` 输出有两个坑。**
    一是 `send()` 内部 `wait(NULL)`，宿主停止读取就把固件堵死；
    二是**写入长度正好等于端点最大包（64 字节）时，主机侧不认为传输结束**，
    整包会被 CDC 驱动扣住，直到下一包才吐出来——症状是"应答要等下一条命令才冒出来"，
    而且只在应答长度恰好是 64 的倍数时才出现（`ls` 刚好 64 字节时最容易撞上）。
    所以输出走 `send_nb` 排队、主循环里推，并且**一次最多推 63 字节**。
-8. **上位机侧：一条会话里只 `ser.timeout = X` 一次。** pyserial 每次给 `timeout`
+7. **上位机侧：一条会话里只 `ser.timeout = X` 一次。** pyserial 每次给 `timeout`
    赋值都会走一次 `SetCommState`；CDC 那边只要还有一次写没落地，这个调用就会
    卡满 5 秒然后抛 `ERROR_SEM_TIMEOUT(121)`，并且**把这个串口卡死到下一次 USB 复位**
    （之后连 `serial.Serial(...)` 都打不开）。表现为"上传到一半串口炸了、每次错得
    还不一样"。`ARSTerm.py` 用固定 `POLL_TIMEOUT` + 截止时间来避免这一点。
-9. **一条命令失败之后必须把接收缓冲清干净。** 上传超时留下的那几百字节会被当成
+8. **一条命令失败之后必须把接收缓冲清干净。** 上传超时留下的那几百字节会被当成
    命令行去解析，从那一刻起每条命令都错开一位、报错看起来随机。
    设备侧出错路径会 `rxFlush()`，并且把含不可打印字节的"命令行"静默丢掉；
    上位机侧则每条命令前 `drain()`、`update` 时读到 `RDY` 为止。
