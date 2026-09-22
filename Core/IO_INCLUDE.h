@@ -1,3 +1,11 @@
+/* 文件系统 + 串口终端总开关：把下面的 0 改成 1 即可启用。
+ * 启用后：ARSFS 文件系统、串口命令（update/get/del/ls/occ）、
+ *         以及"读取 SCHEDULE 文件、按行装载任务"的文件驱动调度器。
+ * 也可以用编译选项 -DUSE_FILE_AND_UART=1 覆盖。 */
+#ifndef USE_FILE_AND_UART
+	#define USE_FILE_AND_UART 1
+#endif
+
 #ifndef IO_INCLUDE
 #define IO_INCLUDE
 
@@ -6,7 +14,6 @@
 #define OS_MAX_PARAM 128    //子程序传入参数的总长度的最大值(128)
 #define OS_MAX_SGL_PG 2048  //每个程序代码体积的最大值为2048B
 #define OS_MAX_MEM 8192     //系统“应用程序”层内存空间总量为8192B
-#endif
 
 typedef enum {
 	MOV,        //将参数2（立即数或地址，BYTE,INT,FLOAT）存入参数1表示的地址内存
@@ -43,7 +50,7 @@ typedef enum {
 	HLT,  //程序结束标记
 } Opcode;
 
-typedef char ars_i8;
+typedef signed char ars_i8;
 typedef short ars_i16;
 typedef int ars_i32;
 typedef unsigned char uars_i8;
@@ -57,3 +64,9 @@ uars_i8 ARS_strcmp(const char *haystack, const char *needle, int len);
 uars_i32 ARS_strtok(char *str, const char delim);
 float copyIntToFloat(int x);
 int copyFloatToInt(float x);
+
+#include "ARSFS.h"
+#include "ARSSCHED.h"
+#include "ARSUART.h"
+
+#endif /* IO_INCLUDE */
