@@ -1,12 +1,14 @@
 # ArtisanOS
 
 一个**语言导向**的极简操作系统：自研字节码虚拟机既是内核的核心组件，也是唯一的不受信代码执行边界。
-配合带碎片合并的动态内存管理（**堆仿栈**）、协作式多任务调度，以及自创的 "ARS" 伪汇编语言与配套编译器。
+配合带碎片合并的动态内存管理（**堆仿栈**）、协作式多任务调度、带跳转链表的**极简文件系统**与串口终端，
+以及自创的 "ARS" 伪汇编语言与配套编译器。
 
 A **language-oriented** minimal operating system: a hand-written bytecode VM that serves as
 both the kernel's core component and the sole boundary for untrusted code — plus a
 fragment-merging allocator (a **heap that behaves like a stack**), cooperative multi-tasking,
-and the original "ARS" pseudo-assembly language with its own compiler.
+a tiny FAT-style flash filesystem with a serial terminal, and the original "ARS"
+pseudo-assembly language with its own compiler.
 
 > **可移植性 | Portability**
 > 除 `Glue.h`（ABI 胶水层）与 `main.ino`（平台入口）之外，全部代码都是平台无关的纯 C，
@@ -23,13 +25,15 @@ and the original "ARS" pseudo-assembly language with its own compiler.
 ArtisanOS 把一台机器变成一个运行自研字节码的"多任务宿主"：
 
 - 编译器把 ARS 源码编译成紧凑、**与目标架构无关**的字节码（`.ars_bin`）
-- 字节码被装载进每个任务独立的代码页
+- 字节码可以随固件烧录（内置模式），也可以放在 FLASH 文件系统里由调度表加载（文件驱动模式）
 - 解释器以轮转方式执行最多 8 个任务
 - 每个任务的运行内存由一套"魔术字块头 + 空闲链表 + 前后合并"的分配器管理
 - 一切外设访问都经过 ABI 胶水层查表，字节码自己碰不到硬件
+- 上位机用 `ARSTerm.py` 通过串口上传 / 下载 / 删除程序，并可视化 FLASH 占用
 
 ArtisanOS turns any 32-bit machine into a multi-tasking host for its own bytecode.
-Compile ARS → load bytecode → run up to 8 tasks round-robin with a coalescing allocator.
+Compile ARS → load bytecode → run up to 8 tasks round-robin with a coalescing allocator,
+with an on-chip filesystem that the scheduler reads its task list from.
 
 **它当前被部署在 RP2040 上，但这不是它的身份。** RP2040 只是众多可能的后端之一。
 
@@ -43,15 +47,18 @@ Compile ARS → load bytecode → run up to 8 tasks round-robin with a coalescin
 
 | 组件 | 是否需要改动 |
 |---|---|
-| `Compiler.c/.h` | ❌ 纯 C，无平台依赖，桌面端交叉编译即可 |
-| `Core/main/IO_INCLUDE.cpp/.h` | ❌ 只用自实现的 `ARS_memmove` / `ARS_memset`，不依赖 libc 以外的任何东西 |
-| `Core/main/Memory.cpp/.h` | ❌ 纯 C。仅操作字节缓冲区 |
-| `Core/main/INTERPRETER.cpp/.h` | ❌ 纯 C。只做指令译码与内存访问 |
-| `Core/main/ByteCode.h` | ❌ 就是一个 `const unsigned char[]` |
-| `Core/main/Glue.h` | ✅ **唯一**包含 `<Arduino.h>` 的地方（`pinMode`/`digitalWrite`/`digitalRead`/`millis`） |
-| `Core/main/main.ino` | ✅ 平台入口：装载字节码、提供调度节拍 |
+| `Compiler/Source/Compiler.c/.h` | ❌ 纯 C，无平台依赖，桌面端直接编译 |
+| `Core/IO_INCLUDE.cpp/.h` | ❌ 只用自实现的 `ARS_memmove` / `ARS_memset`，不依赖 libc 以外的任何东西 |
+| `Core/Memory.cpp/.h` | ❌ 纯 C。仅操作字节缓冲区 |
+| `Core/INTERPRETER.cpp/.h` | ❌ 纯 C。只做指令译码与内存访问 |
+| `Core/ARSSCHED.cpp/.h` | ❌ 纯 C。只依赖文件系统与解释器的公开接口 |
+| `Core/ARSFS.cpp/.h` | ⚠️ 只有约 40 行硬件原语是平台相关的 |
+| `Core/ARSUART.cpp/.h` | ⚠️ 依赖 `Serial`（Arduino 串口 API）。移植时换成任意串口抽象即可 |
+| `Core/ByteCode.h` | ❌ 就是一个 `const unsigned char[]` |
+| `Core/Glue.h` | ✅ **唯一**包含 `<Arduino.h>` 的地方（`pinMode`/`digitalWrite`/`digitalRead`/`millis`） |
+| `Core/main.ino` | ✅ 平台入口：装载任务、提供调度节拍 |
 
-**改写量：两个文件。** 其余是原样编译。
+**必须改写的只有两个文件**（`Glue.h`、`main.ino`），外加一处串口映射。其余原样编译。
 
 ### 2. 字节码与架构无关，一次编译到处运行
 
@@ -82,16 +89,20 @@ while (running) {            // 对应 Arduino 的 loop()
 }
 ```
 
-换句话说：**它是一个用户态可运行的操作系统层**。这意味着调试时不需要真机——
-在 PC 上就能单步、能打印内存状态、能在 gdb 里下断点。开发期的这一条比什么都值钱。
+文件系统也遵循同样的原则：桌面端不需要 FLASH，`ARSFS.cpp` 会退化成一块 RAM 缓冲区，
+**并且严格模拟"先擦后写"**（未擦除就写会返回错误）。所以整个文件系统、
+串口命令、调度逻辑都能在 PC 上回归测试，不必占用真机。
+
+换句话说：**它是一个用户态可运行的操作系统层**。调试时不需要真机——
+在 PC 上就能单步、能打印内存状态、能在 gdb 里下断点。
 
 ### 4. 移植清单
 
 | 目标 | 要做的事 |
 |---|---|
 | 其它 Arduino 核心（ESP32 / STM32 / AVR） | 改 `Glue.h` 里的引脚 API 映射，`main.ino` 基本不动 |
-| 裸机 MCU | 提供 `millis()`（或任意递增计数器）、GPIO 读写，自己写 `main()` |
-| Linux / Windows / macOS 进程 | 提供 4 个桩函数即可，用于开发与回归测试 |
+| 裸机 MCU | 提供 `millis()`（或任意递增计数器）、GPIO 读写、扇区级 FLASH 读写，自己写 `main()` |
+| Linux / Windows / macOS 进程 | 提供 4 个桩函数即可；文件系统自动走 RAM 模拟分支 |
 | WebAssembly / 模拟器 | 保留 `INTERPRETER.cpp` + `Memory.cpp`，前端只做输入输出 |
 
 > 需要留意的约束：`ars_i32` 假定 32 位，内存管理器与字节码都建立在这个前提上。
@@ -134,14 +145,15 @@ ArtisanOS 把二者**合并成一个堆**：每一次 `call` 都是一次堆分�
 ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_invoke` 查表。
 这不是"在一个 OS 上跑个解释器"，而是把**语言运行时本身当作内核**：
 
-- **内核 = 解释器 + 内存管理器 + 调度器**，三者加起来体积很小，全部可审计
+- **内核 = 解释器 + 内存管理器 + 调度器 + 文件系统**，全部可审计
 - **用户态 = 字节码**，它没有指针、没有原生执行权，唯一的对外通道是 ABI 表
+  （连读写文件也必须经 ABI 通道，不能自己碰 FLASH）
 - **边界由语言运行时定义**，而不是由 MMU 定义——这正是语言导向 OS 的出发点
   （Inferno 的 Dis、Singularity 的 SIP 都在同一条脉络上）
 
 这条路线带来的好处正好契合嵌入式：
 
-- 不需要 MMU 就能定义"进程"的概念
+- 不需要 MMU 就能定义"进程"与"文件"的概念
 - 应用不需要针对每个平台重新编译，字节码跨架构通用
 - 内核很小、行为可复现，适合资源紧张且要求确定性的设备
 
@@ -154,9 +166,13 @@ ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_inv
 - **自研字节码虚拟机** — 31 条指令、类型化操作数（B/I/F）、专用结果寄存器 `CalcResu`
 - **堆仿栈的动态内存管理** — `SPLT`/`FREE` 魔术字块头 + `Check` 守卫字 + 空闲链表 + 碎片合并
 - **协作式多任务** — 8 个任务槽、轮转调度、每任务独立代码页与内存层级
-- **ABI 胶水层** — 字节码不原生执行，一切硬件访问都经 `abi_invoke` 查表
+- **极简 FLASH 文件系统** — 32 个目录项、128 个 512B 数据页（共 64KB）、
+  用一张 128 字节的跳转链表（FAT 式）描述文件拓扑，无文件夹
+- **文件驱动的调度器** — 从 `SCHEDULE` 文件按行读取程序名，装载后轮转执行
+- **串口终端** — 上位机可上传 / 下载 / 删除程序，并可视化 FLASH 占用
+- **ABI 胶水层** — 字节码不原生执行，一切硬件与文件访问都经 `abi_invoke` 查表
 - **字节码跨架构通用** — 一份 `.ars_bin` 喂给所有 32 位小端平台
-- **可作为宿主进程运行** — 平台层仅需 4 个符号，便于开发、调试与回归测试
+- **可作为宿主进程运行** — 平台层仅需 4 个符号，文件系统自带 RAM 模拟，便于开发与回归测试
 - **ARS 伪汇编** — 一门为这台 VM 量身定做、语法相当"有主见"的小语言
 
 ---
@@ -165,21 +181,26 @@ ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_inv
 
 ```
 ArtisanOS/
-├── Core/
-│   ├── main.ino
-│   ├── INTERPRETER.cpp/.h
-│   ├── Memory.cpp/.h
-│   ├── IO_INCLUDE.cpp/.h
-│   ├── Glue.h
-│   └── ByteCode.h
+├── Core/                       # 操作系统内核（Arduino 草图）
+│   ├── main.ino                # 【平台相关】入口：装载任务 + 指令调度
+│   ├── INTERPRETER.cpp/.h      # 指令实现与 opcode 分发表
+│   ├── Memory.cpp/.h           # 运行内存管理：分配/释放/合并
+│   ├── IO_INCLUDE.cpp/.h       # 基础类型、Opcode 枚举、内存工具、总开关
+│   ├── Glue.h                  # 【平台相关】ABI 胶水层，用户扩展点
+│   ├── ByteCode.h              # 内置程序的字节码数组
+│   ├── ARSFS.cpp/.h            # 文件系统：FCB + 跳转链表 + 页读写
+│   ├── ARSUART.cpp/.h          # 串口命令：update/get/del/ls/occ/ver/format
+│   └── ARSSCHED.cpp/.h         # 文件驱动的调度器（读 SCHEDULE 装载任务）
 ├── Compiler/
 │   ├── Demo/
-│   │   ├── LEDFlash.txt
-│   │   ├── LEDStream.txt
-│   │   └── recursionTest.txt
+│   │   ├── LEDFlash.txt        # 示例：光敏电阻控制 LED
+│   │   ├── LEDStream.txt       # 示例：流水灯
+│   │   └── recursionTest.txt   # 示例：递归 / 子程序调用
 │   └── Source/
-│       ├── ARSIDE.html
-│       └── Compiler.c/.h
+│       ├── ARSIDE.html         # 单文件网页 IDE（同一套编译逻辑的 JS 版）
+│       └── Compiler.c/.h       # ARS 编译器（纯 C）
+├── Terminal/
+│   └── ARSTerm.py              # 上位机串口终端（需要 pyserial）
 ├── README.md
 └── LICENSE
 ```
@@ -191,33 +212,231 @@ ArtisanOS/
 ### 1. 编译 ARS 编译器 | Build the compiler
 
 ```bash
-gcc Compiler/Compiler.c -o arscc
+gcc Compiler/Source/Compiler.c -o arscc
 ```
 
 ### 2. 编译 ARS 程序 | Compile an ARS program
 
 ```bash
-./arscc Compiler/LEDStream.txt
-# -> Compiler/LEDStream.ars_bin，并打印字节码 dump
+./arscc Compiler/Demo/LEDStream.txt
+# -> Compiler/Demo/LEDStream.ars_bin，并打印字节码 dump
 ```
 
 也可以用 `ARSIDE.html`：浏览器直接打开，粘贴/拖入源码，点「编译」导出 `output.ars_bin`，
 控制台会给出 `main` 头部地址、各标签地址与字节码 dump。两个编译器的输出经过校验是
 **逐字节一致**的。
 
-### 3. 运行 | Run
+### 3. 两种运行模式 | Two run modes
 
-**嵌入式**：把字节码数组贴进 `Core/main/ByteCode.h`，用 Arduino IDE 上传到 Pico，上电即运行。
+`Core/IO_INCLUDE.h` 顶部的 `USE_FILE_AND_UART` 决定用哪一套：
 
-`main.ino` 默认装载两个任务：
+```c
+#ifndef USE_FILE_AND_UART
+	#define USE_FILE_AND_UART 1     /* 0 = 固件内置模式，1 = 文件驱动模式 */
+#endif
+```
+
+也可以用编译选项覆盖：`-DUSE_FILE_AND_UART=0`。
+
+| | `0` 固件内置模式 | `1` 文件驱动模式（当前默认） |
+|---|---|---|
+| 程序来源 | `ByteCode.h` 里的数组，随固件烧录 | FLASH 文件系统里的文件 |
+| 需要的组件 | 解释器 + 内存管理器 | 再加上 `ARSFS` / `ARSUART` / `ARSSCHED` |
+| 任务表 | `main.ino` 里写死 | 读 `SCHEDULE` 文件，每行一个文件名 |
+| 外设通道 | `abi_invoke 0/1/2`（GPIO、定时器） | 再加 `3/4/5/6`（文件读写） |
+
+**内置模式**默认装载两个任务：
 
 | 任务 | 程序 | 行为 |
 |---|---|---|
 | 0 | `LED_Flash` | 读 GPIO13（光敏电阻模块 DO），为 1 时点亮 GPIO6 的 LED，否则熄灭 |
 | 1 | `LED_Stream` | GPIO18/19/20 三个 LED 轮流点亮，形成流水灯 |
 
-**宿主机（推荐用于开发）**：把 4 个平台符号做成桩函数，`INTERPRETER.cpp` 与 `Memory.cpp`
-原样编译，即可在 PC 上单步调试、打印堆状态、做回归测试。项目就是以这种方式完成功能验证的。
+**文件驱动模式**首次启动会检测到 `SCHEDULE` 为空，自动把上面两个程序写进文件系统
+并生成调度表，所以刷完固件立刻就能看到效果；之后可以用串口终端随意替换。
+
+### 4. 烧录与连接 | Flash & connect
+
+1. 用 Arduino IDE 打开 `Core/main/main.ino`，开发板选 **Raspberry Pi Pico**，点上传。
+   也可以按住 BOOTSEL 插 USB，把生成的 `main.ino.uf2` 拖进 `RPI-RP2` 盘。
+2. 烧录完成后设备会枚举成一个 USB CDC 串口（`2E8A:00C0`）。
+3. 上位机连接：
+
+```bash
+pip install pyserial
+python Terminal/ARSTerm.py COM3          # Windows
+python Terminal/ARSTerm.py /dev/ttyACM0  # Linux
+```
+
+> 注意：**串口监视器会独占串口**。Arduino IDE 的串口监视器开着时，
+> 外部终端和上传工具都打不开同一个口，用之前先关掉。
+
+---
+
+## 文件系统 | The Filesystem
+
+一个**扁平、定长、无文件夹**的极简文件系统，整个实现不到 400 行，不依赖 libc。
+
+### 存储布局
+
+固定占用 FLASH **末尾 68KB**（`FS_TOTAL = 69632` 字节）：
+
+```
+偏移 0        +------------------------+
+              | FCB[32]                |  32 × 20 = 640B   目录项
+偏移 640      +------------------------+
+              | nextPg[128]            |  128B             跳转链表
+偏移 768      +------------------------+
+              | 保留（补到扇区边界）      |
+偏移 4096     +------------------------+  <- DATA_OFF
+              | page 0    (512B)       |
+              | page 1    (512B)       |  共 128 页 = 64KB
+              | ...                    |  每页全部是数据，页内无任何元数据
+偏移 69632    +------------------------+
+```
+
+**基地址按芯片实际容量算**，不写死：取 `FLASH 末尾 FS_TOTAL 字节`。
+2MB 的 Pico 上就是 `0x101EF000`；4MB / 8MB / 16MB 板子会自动落在各自末尾。
+容量读不到时保守回退到 2MB —— 猜小只是浪费尾部空间，绝不会越界。
+
+### 拓扑：128 字节的跳转链表（FAT 式）
+
+文件由哪些页组成、以什么顺序组成，全部记在 `nextPg[128]` 这一张表里：
+**下标是"本页"，值是"下一页"**。
+
+```
+nextPg[i] == FREE_OR_DEL (0xFE)   页 i 空闲
+nextPg[i] == EOF_PG      (0xFF)   页 i 是文件最后一页
+nextPg[i] == 0..127               页 i 的下一页是 nextPg[i]
+```
+
+于是读文件就是一路跳过去：
+
+```
+FCB.start = 3
+  page 3 ──► page 5 ──► page 9 ──► EOF
+nextPg[3]=5  nextPg[5]=9  nextPg[9]=0xFF
+```
+
+`FCB` 只需记 `start`（首页）和 `size`（实际字节数，末页可能有填充）。
+写入顺序也是刻意的：**先写数据页，最后再落盘元数据**。中途掉电时表里那些页仍算空闲，
+不会留下指向脏数据的坏链。
+
+### 目录项 FCB
+
+```c
+typedef struct FCB {
+	ars_i8  fileName[15];   /* 定长 15 字节，不足用空格补齐，无扩展名 */
+	uars_i8 start;          /* 首页下标；FREE_OR_DEL 空闲，EOF_PG 空文件 */
+	ars_i16 size;           /* 实际长度（字节） */
+	uars_i8 attr;           /* 预留属性位 */
+} FCB;                      /* 20 字节 */
+```
+
+- 最多 **32 个文件**，单一命名空间，没有文件夹
+- 单个文件上限 `FILE_MAX = 2048` 字节（正好一个任务代码页）
+- 第 0 号目录项**固定留给调度表 `SCHEDULE`**
+
+### 格式化与版本
+
+元数据扇区开头有 `MAGIC`（`'ARFS'`）和 `FS_VER`。挂载时两者都要对得上，否则自动重新格式化。
+**改动元数据语义时必须递增 `FS_VER`** —— 否则旧盘会被当成合法盘继续用，
+格式变了却没人重建，症状是"文件系统看起来在跑，但内容全是错的"。
+
+### 首次启动的预置内容
+
+文件驱动模式下，如果 `SCHEDULE` 还是空的，固件会把内置的两个示例写进去：
+
+```
+SCHEDULE  ->  "LEDFLASH\nLEDSTREAM\n"
+LEDFLASH  ->  LED_Flash  的字节码（96 字节）
+LEDSTREAM ->  LED_Stream 的字节码（210 字节）
+```
+
+这一手同时充当了文件系统写通路的自检：刷完固件如果流水灯亮了，
+说明初始化、分配、页写、元数据落盘、调度装载这一整条链路都是通的。
+
+---
+
+## 调度器 | The Scheduler
+
+`Core/ARSSCHED.cpp` 把"任务表"也变成一个文件：
+
+1. 确保 0 号目录项是 `SCHEDULE`（不存在则创建；若 0 号位被别的文件占了，退化为按名字查找）
+2. 逐行读出文件名（每行 15 字节、空格补齐、无扩展名）
+3. 依次读取对应文件的字节码，装入 `exeMem[任务号]`
+4. 调用 `call()` 建立该任务的初始作用域，然后轮转执行
+
+```
+SCHEDULE 文件内容（每行一个文件名）:
+LEDFLASH
+LEDSTREAM
+```
+
+于是"改任务列表"不需要重新编译固件，只要用串口改一个文件。
+
+---
+
+## 串口终端与协议 | Terminal & Protocol
+
+### 上位机命令
+
+`Terminal/ARSTerm.py`（依赖 `pyserial`）：
+
+| 命令 | 作用 |
+|---|---|
+| `update <localfile> <dest_name>` | 上传本地文件到设备，不存在则创建 |
+| `get <dest_name>` | 下载文件，保存为 `<8位随机数>.txt`（HEX 文本） |
+| `del <dest_name>` | 删除文件 |
+| `ls` | 列出所有文件名 |
+| `occ [text]` | 可视化 FLASH 占用：加 `text` 输出纯文本，否则红=占用 / 绿=空闲 |
+| `ver` | 查询固件元数据版本与已装载任务数 |
+| `help` / `quit` | 帮助 / 退出 |
+
+设备侧的命令名与之一一对应（另有 `format` 用于清空重建文件系统）。
+
+### 行协议（便于自己写客户端）
+
+设备**不回显、不提示符**，全部应答以 `\r\n` 结尾：
+
+| 请求 | 应答 |
+|---|---|
+| `update <name> <len>` | `RDY` → 每 128 字节一块，每块回 `ACK <已收字节数>` → 全部收完落盘后 `OK`；超时或写失败回 `ERR ...` |
+| `get <name>` | `DATA <len>` → 每 32 字节一行的十六进制 → 空行 → `OK`；不存在回 `ERR noent` |
+| `del <name>` | `OK` / `ERR noent` |
+| `ls` | `LS` → 逐行文件名 → `OK` |
+| `occ` | `USED <n> FREE <m>` → 128 页的页图（每行 8 页）→ `FCB:` → 32 行目录项 → `OK` |
+| `ver` | `ARS FS_VER=<n> TASKS=<n>` |
+| `format` | `OK` / `ERR format` |
+
+关于 `occ` 的颜色：设备发的是**真正的 ANSI 转义序列**（`0x1B`），不是字面文本。
+不支持 ANSI 的终端（例如 Arduino IDE 的串口监视器）会把它原样显示出来，
+所以另外提供了不带任何转义码的 `occ text`：
+
+```
+occ text
+  USED 3 FREE 125 (*=used .=free)
+  000* 001* 002* 003. 004. 005. 006. 007.
+  008. 009. 010. 011. ...
+  FCB:
+  SCHEDULE start=2 size=19
+  LEDFLASH start=0 size=96
+  LEDSTREAM start=1 size=210
+  FREE_OR_DEL
+  ...
+```
+
+### 字节码读写文件
+
+文件驱动模式下，字节码也能访问文件，但**必须经过 ABI 查表**（`Glue.h`），
+并且由互斥量保护 —— 字节码自己碰不到 FLASH：
+
+| 调用号 | 函数 | 调用约定（先用 `pushp` 压参） |
+|---|---|---|
+| 3 | `FILE_OPEN` | 压入 15 字节文件名 → 打开（不存在则创建），返回文件长度 |
+| 4 | `FILE_READ` | 压入 变量地址、长度 → 从当前游标读入该变量，返回实读字节数 |
+| 5 | `FILE_WRITE` | 压入 变量地址、长度 → 写到当前游标，返回实写字节数 |
+| 6 | `FILE_CLOSE` | 关闭会话 |
 
 ---
 
@@ -346,6 +565,7 @@ mov B $byteVar $temp     ; 反过来：截回单字节
 | 0 | `gWrite` | `digitalWrite(pin, val)` |
 | 1 | `gRead` | `digitalRead(pin)` → `CalcResu` |
 | 2 | `Timer` | `millis()` → `CalcResu` |
+| 3–6 | 文件操作 | 见上文「字节码读写文件」 |
 
 调用前用 `pushp` 依次压入参数（4 字节对齐），调用后参数栈自动清空。
 
@@ -357,6 +577,7 @@ abi_invoke 0     ; digitalWrite(6, 1)
 
 `Glue.h` 是留给使用者的扩展点，也是移植时唯一必须改的文件之一：
 加一个函数、在 `ABI_CALL` 里加一个枚举、在 `ABIs[]` 里登记即可。
+注意 `Glue.h` 里不止有声明还有定义，**同一个程序只允许一个编译单元包含它**（当前是 `INTERPRETER.cpp`）。
 
 ---
 
@@ -429,7 +650,7 @@ abi_invoke 0     ; digitalWrite(6, 1)
 
 ## 示例 | Examples
 
-光敏电阻控制 LED（`Compiler/LEDFlash.txt`）：
+光敏电阻控制 LED（`Compiler/Demo/LEDFlash.txt`，编译后 96 字节）：
 
 ```
 main
@@ -458,14 +679,33 @@ main
 endmain
 ```
 
-流水灯（`Compiler/LEDStream.txt`）演示了子程序延时、数组保存引脚号与循环取模：
+流水灯（`Compiler/Demo/LEDStream.txt`，编译后 210 字节）演示了子程序延时、数组保存引脚号与循环取模：
 
 ```
 	pushp I $delay
 	call delay_ms
 ```
 
-更多样例见 `Compiler/` 目录下的 `*.txt`。
+更多样例见 `Compiler/Demo/` 目录。
+
+---
+
+## 重要注意事项 | Notes
+
+1. **`flash_range_erase/program` 的第一个参数是 FLASH 偏移，不是 XIP 地址。**
+   传 `0x101EF000` 这种 XIP 地址会命中 pico-sdk 的
+   `hard_assert(flash_offs + count <= PICO_FLASH_SIZE_BYTES)`，固件在 `setup()` 里就停住，
+   主机将会报告"**无法识别的 USB 设备**"。
+   `ARSFS.cpp` 里因此把两者分开：`gFsBase`（XIP 地址，只用于读）与 `gFsOff`（偏移，用于擦写）。
+2. **擦写 FLASH 期间不能在 FLASH 上取指，必须关中断。**
+   所以文件系统的挂载与写入要等 USB 枚举完成（`main.ino` 里推迟到第一次 `loop()` 并先等 1.5 秒），
+   否则主机在枚举途中拿不到描述符，同样表现为"无法识别"。
+3. **`ARS_memset` / `ARS_memmove` 是"拷贝"语义，第二个参数是源指针**，不是 libc 的 `memset`。
+   传 0 会直接返回、什么都不做——一个静默的空操作曾经让位图没被清零，
+   结果 128 页全被当成"已占用"，所有写入都返回 `FS_EFULL`。
+4. **`ars_i8` 是显式 `signed char`。** 某些 Arduino 核心（mbed）带 `-funsigned-char`，
+   裸 `char` 会让同一份字节码在设备上跑出与宿主不同的结果；显式写出符号性后，
+   移植到任何平台语义都相同。
 
 ---
 
@@ -478,7 +718,7 @@ endmain
 5. **所有比较结果都在 `CalcResu`**，`jmp_t` 只看它。
 
 这些约定换来的是极小的编译器与解释器：`Compiler.c` 是单文件纯 C，解释器在极小的内存占用下
-同时实现多任务调度与带碎片合并的内存管理——也因此才能跨平台随意移植。
+同时实现多任务调度、带碎片合并的内存管理与一个文件系统——也因此才能跨平台随意移植。
 
 ---
 
@@ -493,8 +733,13 @@ endmain
 - **解释器的越界检查尚未全部强制**：部分内存接口在越界时返回错误码，而调用方未检查。
   把每个偏移查询的返回值变成硬约束，是这套"语言基隔离"设计兑现承诺的关键一步——
   而且由于字节码本就不原生执行，这一步**不需要 MMU 也能做到**。
+- **文件系统是无事务的**：元数据每次都整扇区重写，写入顺序刻意保证"掉电不会留坏链"，
+  但没有日志/双份目录，掉电仍可能丢掉最后一次操作。
+- **文件系统容量固定**：32 个目录项、128 个数据页、单文件 2048 字节，无子目录，
+  文件名定长 15 字节且不分大小写之外的任何命名规则。
+- **FLASH 写入会短暂关中断**：一次页写入要读-改-擦-写整个 4KB 扇区，
+  这段时间（约几十毫秒）CPU 不响应中断，USB 批量传输靠 NAK 重试扛过去。
 - **32 位假设**：`ars_i32` 与内存管理器的块布局都建立在 32 位寻址上。
-- **无文件系统**：内置字节码以数组形式随固件烧录；`.ars_bin` 需要自行接入加载通道。
 
 ---
 
@@ -510,6 +755,6 @@ MIT License
 
 ---
 
-**如果你喜欢这种把虚拟机、内存管理器和小语言全部握在自己手里，
+**如果你喜欢这种把虚拟机、内存管理器、文件系统和小语言全部握在自己手里，
 并且希望它能跑在任何一台机器上的开发方式，
 欢迎一起把这个"属于自己的微型操作系统世界"继续做下去。**
