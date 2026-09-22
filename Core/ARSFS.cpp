@@ -1,5 +1,5 @@
 #ifndef ARSFS_H
-	#include "ARSFS.h"
+#include "ARSFS.h"
 #endif
 
 #if USE_FILE_AND_UART
@@ -36,8 +36,12 @@ static int nameEq(const ars_i8 *packed, const char *name) {
 	return 1;
 }
 
-static uars_i32 pgOffset(uars_i8 index) { return DATA_OFF + (uars_i32)index * PG; }
-static int pgCount(long len) { return len > 0 ? (int)((len + PG - 1) / PG) : 0; }
+static uars_i32 pgOffset(uars_i8 index) {
+	return DATA_OFF + (uars_i32)index * PG;
+}
+static int pgCount(long len) {
+	return len > 0 ? (int)((len + PG - 1) / PG) : 0;
+}
 
 static int pgAlloc(void) {
 	for (int i = 0; i < BMP; i++)
@@ -59,8 +63,13 @@ static void pgFreeChain(int start) {
 	}
 }
 
-void arsfs_lock(void) { while (fsLock) { } fsLock = 1; }
-void arsfs_unlock(void) { fsLock = 0; }
+void arsfs_lock(void) {
+	while (fsLock) {}
+	fsLock = 1;
+}
+void arsfs_unlock(void) {
+	fsLock = 0;
+}
 
 uars_i32 gFsBase = 0;
 static uars_i32 gFsOff = 0;
@@ -74,9 +83,9 @@ static uars_i32 gFsOff = 0;
 uars_i32 arsfsBindBase(void) {
 	uars_i32 flashSize = 0;
 #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
-	#ifdef PICO_FLASH_SIZE_BYTES
-		flashSize = (uars_i32)PICO_FLASH_SIZE_BYTES;
-	#endif
+#ifdef PICO_FLASH_SIZE_BYTES
+	flashSize = (uars_i32)PICO_FLASH_SIZE_BYTES;
+#endif
 #endif
 	if (flashSize < FS_MIN_GAP || (flashSize & (flashSize - 1)) != 0) {
 		flashSize = 2u * 1024u * 1024u;
@@ -87,34 +96,38 @@ uars_i32 arsfsBindBase(void) {
 }
 
 #if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
-	#include <Arduino.h>
-	#include <hardware/flash.h>
-	#include <hardware/sync.h>
+#include <Arduino.h>
+#include <hardware/flash.h>
+#include <hardware/sync.h>
 
-	static inline void flashBegin(void) { noInterrupts(); }
-	static inline void flashEnd(void) { interrupts(); }
+static inline void flashBegin(void) {
+	noInterrupts();
+}
+static inline void flashEnd(void) {
+	interrupts();
+}
 
-	ars_i8 arsfs_hw_read(uars_i32 off, uars_i8 *dst, uars_i32 len) {
-		const uars_i8 *src = (const uars_i8 *)(gFsBase + off);
-		for (uars_i32 i = 0; i < len; i++) dst[i] = src[i];
-		return FS_OK;
-	}
+ars_i8 arsfs_hw_read(uars_i32 off, uars_i8 *dst, uars_i32 len) {
+	const uars_i8 *src = (const uars_i8 *)(gFsBase + off);
+	for (uars_i32 i = 0; i < len; i++) dst[i] = src[i];
+	return FS_OK;
+}
 
-	ars_i8 arsfs_hw_erase(uars_i32 off, uars_i32 len) {
-		(void)len;
-		flashBegin();
-		flash_range_erase(gFsOff + off, SECTOR);
-		flashEnd();
-		return FS_OK;
-	}
+ars_i8 arsfs_hw_erase(uars_i32 off, uars_i32 len) {
+	(void)len;
+	flashBegin();
+	flash_range_erase(gFsOff + off, SECTOR);
+	flashEnd();
+	return FS_OK;
+}
 
-	ars_i8 arsfs_hw_write(uars_i32 off, const uars_i8 *src, uars_i32 len) {
-		(void)len;
-		flashBegin();
-		flash_range_program(gFsOff + off, (const uint8_t *)src, SECTOR);
-		flashEnd();
-		return FS_OK;
-	}
+ars_i8 arsfs_hw_write(uars_i32 off, const uars_i8 *src, uars_i32 len) {
+	(void)len;
+	flashBegin();
+	flash_range_program(gFsOff + off, (const uint8_t *)src, SECTOR);
+	flashEnd();
+	return FS_OK;
+}
 #endif
 
 static uars_i8 secBuf[SECTOR];
@@ -166,19 +179,26 @@ static int fcbAlloc(void) {
 
 int arsfs_used(void) {
 	int n = 0;
-	for (int i = 0; i < BMP; i++) if (meta.nextPg[i] != FREE_OR_DEL) n++;
+	for (int i = 0; i < BMP; i++)
+		if (meta.nextPg[i] != FREE_OR_DEL) n++;
 	return n;
 }
 
-int arsfs_free(void) { return BMP - arsfs_used(); }
+int arsfs_free(void) {
+	return BMP - arsfs_used();
+}
 
 int arsfs_page_used(int page) {
 	return (page >= 0 && page < BMP && meta.nextPg[page] != FREE_OR_DEL) ? 1 : 0;
 }
 
-int arsfs_fcb_start(int i) { return (i >= 0 && i < FCB_CNT) ? meta.fcb[i].start : FREE_OR_DEL; }
+int arsfs_fcb_start(int i) {
+	return (i >= 0 && i < FCB_CNT) ? meta.fcb[i].start : FREE_OR_DEL;
+}
 
-int arsfs_fcb_size(int i) { return (i >= 0 && i < FCB_CNT) ? meta.fcb[i].size : 0; }
+int arsfs_fcb_size(int i) {
+	return (i >= 0 && i < FCB_CNT) ? meta.fcb[i].size : 0;
+}
 
 char arsfs_fcb_name(int i, int k) {
 	if (i < 0 || i >= FCB_CNT || k < 0 || k >= NAME_LEN) return ' ';
@@ -250,6 +270,7 @@ static ars_i8 writeFileAt(int idx, const uars_i8 *src, long len) {
 		}
 		if (head < 0) head = p;
 		if (prev >= 0) meta.nextPg[prev] = (uars_i8)p;
+		meta.nextPg[p] = EOF_PG;
 		prev = p;
 
 		long chunk = len - done;
@@ -301,7 +322,9 @@ ars_i8 createFileAt(const char *name, int slot) {
 	return metaFlush();
 }
 
-ars_i8 writeFileAtSlot(int slot, const uars_i8 *src, long len) { return writeFileAt(slot, src, len); }
+ars_i8 writeFileAtSlot(int slot, const uars_i8 *src, long len) {
+	return writeFileAt(slot, src, len);
+}
 
 ars_i8 delFile(const char *name) {
 	int idx = arsfs_find(name);
