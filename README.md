@@ -52,7 +52,7 @@ with an on-chip filesystem that the scheduler reads its task list from.
 | `Core/Memory.cpp/.h` | ❌ 纯 C。仅操作字节缓冲区 |
 | `Core/INTERPRETER.cpp/.h` | ❌ 纯 C。只做指令译码与内存访问 |
 | `Core/ARSSCHED.cpp/.h` | ❌ 纯 C。只依赖文件系统与解释器的公开接口 |
-| `Core/ARSFS.cpp/.h` | ⚠️ 只有约 40 行硬件原语是平台相关的 |
+| `Core/ARSFS.cpp/.h` | ⚠️ 平台无关，但需要目标平台提供 3 个硬件原语 `arsfs_hw_read` / `arsfs_hw_erase` / `arsfs_hw_write`（RP2040 的实现已内置） |
 | `Core/ARSUART.cpp/.h` | ⚠️ 依赖 `Serial`（Arduino 串口 API）。移植时换成任意串口抽象即可 |
 | `Core/ByteCode.h` | ❌ 就是一个 `const unsigned char[]` |
 | `Core/Glue.h` | ✅ **唯一**包含 `<Arduino.h>` 的地方（`pinMode`/`digitalWrite`/`digitalRead`/`millis`） |
@@ -89,9 +89,11 @@ while (running) {            // 对应 Arduino 的 loop()
 }
 ```
 
-文件系统也遵循同样的原则：桌面端不需要 FLASH，`ARSFS.cpp` 会退化成一块 RAM 缓冲区，
-**并且严格模拟"先擦后写"**（未擦除就写会返回错误）。所以整个文件系统、
-串口命令、调度逻辑都能在 PC 上回归测试，不必占用真机。
+文件系统也遵循同样的原则：它的平台相关部分被压缩成了**三个函数**
+（`arsfs_hw_read` / `arsfs_hw_erase` / `arsfs_hw_write`）。
+桌面回归测试只要提供一份"用 RAM 模拟 FLASH"的替身——**并且严格模拟"先擦后写"**
+（未擦除就写要报错）——整个文件系统、串口命令与调度逻辑就都能在 PC 上跑，不必占用真机。
+换句话说，**移植文件系统的工作量就是实现这三个原语**。
 
 换句话说：**它是一个用户态可运行的操作系统层**。调试时不需要真机——
 在 PC 上就能单步、能打印内存状态、能在 gdb 里下断点。
@@ -101,8 +103,8 @@ while (running) {            // 对应 Arduino 的 loop()
 | 目标 | 要做的事 |
 |---|---|
 | 其它 Arduino 核心（ESP32 / STM32 / AVR） | 改 `Glue.h` 里的引脚 API 映射，`main.ino` 基本不动 |
-| 裸机 MCU | 提供 `millis()`（或任意递增计数器）、GPIO 读写、扇区级 FLASH 读写，自己写 `main()` |
-| Linux / Windows / macOS 进程 | 提供 4 个桩函数即可；文件系统自动走 RAM 模拟分支 |
+| 裸机 MCU | 提供 `millis()`（或任意递增计数器）、GPIO 读写、扇区级 FLASH 擦写（`arsfs_hw_*`），自己写 `main()` |
+| Linux / Windows / macOS 进程 | 提供 4 个平台桩函数 + 一份 RAM 版 `arsfs_hw_*`，用于开发、调试与回归测试 |
 | WebAssembly / 模拟器 | 保留 `INTERPRETER.cpp` + `Memory.cpp`，前端只做输入输出 |
 
 > 需要留意的约束：`ars_i32` 假定 32 位，内存管理器与字节码都建立在这个前提上。
@@ -172,7 +174,7 @@ ArtisanOS 的"进程"就是一段字节码，"系统调用"就是一次 `abi_inv
 - **串口终端** — 上位机可上传 / 下载 / 删除程序，并可视化 FLASH 占用
 - **ABI 胶水层** — 字节码不原生执行，一切硬件与文件访问都经 `abi_invoke` 查表
 - **字节码跨架构通用** — 一份 `.ars_bin` 喂给所有 32 位小端平台
-- **可作为宿主进程运行** — 平台层仅需 4 个符号，文件系统自带 RAM 模拟，便于开发与回归测试
+- **可作为宿主进程运行** — 平台层仅需 4 个符号 + 3 个 FLASH 原语，便于开发与回归测试
 - **ARS 伪汇编** — 一门为这台 VM 量身定做、语法相当"有主见"的小语言
 
 ---
@@ -244,6 +246,11 @@ gcc Compiler/Source/Compiler.c -o arscc
 | 需要的组件 | 解释器 + 内存管理器 | 再加上 `ARSFS` / `ARSUART` / `ARSSCHED` |
 | 任务表 | `main.ino` 里写死 | 读 `SCHEDULE` 文件，每行一个文件名 |
 | 外设通道 | `abi_invoke 0/1/2`（GPIO、定时器） | 再加 `3/4/5/6`（文件读写） |
+
+关掉开关时 `ARSFS.cpp` 会整个编译成空文件——文件系统的接口只被 `ARSUART` / `ARSSCHED` /
+`Glue.h` 内部使用，而它们各自的 `#else` 已经把这条路堵死了。所以**不留空实现**：
+万一将来有人在关闭状态下误用，会在**链接期**直接报未定义符号，而不是运行期悄悄返回 `FS_EIO`。
+唯一必须保留空实现的是 `Glue.h` 的那四个 `gFile*`，因为字节码的 ABI 表是**无条件编译**的。
 
 **内置模式**默认装载两个任务：
 
@@ -706,6 +713,8 @@ endmain
 4. **`ars_i8` 是显式 `signed char`。** 某些 Arduino 核心（mbed）带 `-funsigned-char`，
    裸 `char` 会让同一份字节码在设备上跑出与宿主不同的结果；显式写出符号性后，
    移植到任何平台语义都相同。
+5. **`arsfs_hw_*` 的桌面替身必须照实模拟擦除态 `0xFF`。** 把 RAM 替身的初值设成 0，
+   会让"忘了清零位图"这类 bug 在 PC 上永远测不出来。
 
 ---
 
