@@ -1,5 +1,6 @@
 /* 串口命令处理 + FLASH 拓扑可视化。
- * 命令：update / get / del / ls / occ [text] / ver
+ * 命令：update / get / del / ls / occ [text] / ver / format / reboot <名> / reboot_all
+ * 命令词不区分大小写；reboot 也可以写成 restart。
  */
 #ifndef ARSFS_H
 	#include "ARSFS.h"
@@ -19,6 +20,9 @@ static char cmdBuf[CMD_MAX];
 static uars_i16 cmdLen = 0;
 static uars_i8 upBuf[FILE_MAX];   /* 上传暂存 */
 static uars_i8 downBuf[FILE_MAX]; /* 下载暂存 */
+static uars_i8 wdtReset = 0;      /* 上次复位是不是看门狗超时（卡死自恢复的痕迹） */
+
+void arsuart_wdtReport(uars_i8 flag) { wdtReset = flag; }
 
 /* ---- 不依赖 snprintf 的数字输出 ---- */
 static void putU32(uars_i32 v) {
@@ -89,6 +93,7 @@ static void handleUpdate(char *args) {
 		unsigned long t0 = millis();
 		while (n < want && (millis() - t0) < 2000) {
 			if (Serial.available()) { upBuf[got + n] = (uars_i8)Serial.read(); n++; t0 = millis(); }
+			ARS_alive();
 		}
 		if (n < want) { putLine("ERR timeout"); return; }
 		got += n;
@@ -157,6 +162,9 @@ static void dispatch(char *line) {
 	while (*sp && *sp != ' ') sp++;
 	if (*sp) *sp++ = 0;
 	if (!cmd[0]) return;
+	/* 命令词统一转小写：终端上大小写混着敲都能用 */
+	for (char *p = cmd; *p; p++)
+		if (*p >= 'A' && *p <= 'Z') *p += 'a' - 'A';
 	/* ARS_strcmp 返回 0 表示前 len 个字节相同 */
 	int isUpdate = (ARS_strcmp(cmd, "update", 6) == 0);
 	int isGet = (ARS_strcmp(cmd, "get", 3) == 0);
@@ -165,6 +173,9 @@ static void dispatch(char *line) {
 	int isOcc = (ARS_strcmp(cmd, "occ", 3) == 0);
 	int isFmt = (ARS_strcmp(cmd, "format", 6) == 0);
 	int isVer = (ARS_strcmp(cmd, "ver", 3) == 0);
+	/* restart 是 reboot 的同义词 */
+	int isReboot = (ARS_strcmp(cmd, "reboot", 6) == 0 || ARS_strcmp(cmd, "restart", 7) == 0);
+	int isRebootAll = (ARS_strcmp(cmd, "reboot_all", 10) == 0 || ARS_strcmp(cmd, "restart_all", 11) == 0);
 	if (isUpdate) handleUpdate(sp);
 	else if (isGet) handleGet(sp);
 	else if (isDel) handleDel(sp);
@@ -174,6 +185,8 @@ static void dispatch(char *line) {
 		putU32(FS_VER);
 		Serial.print(" TASKS=");
 		putU32((uars_i32)gSchedTasks);
+		Serial.print(" WDT=");
+		putU32((uars_i32)wdtReset);
 		putLine("");
 	}
 	else if (isOcc) {
@@ -184,11 +197,29 @@ static void dispatch(char *line) {
 		arsfs_unlock();
 		putLine("OK");
 	}
-	else if (isFmt) { /* 重建文件系统：清空所有目录项与位图 */
+	else if (isFmt) {
+		/* 恢复出厂设置：清空 -> 铺回出厂示例 -> 立刻按新的 SCHEDULE 重启任务 */
 		arsfs_lock();
 		ars_i8 rc = format();
 		arsfs_unlock();
+		if (rc == FS_OK) {
+			ARS_provision();
+			arssched_rebootAll();
+		}
 		putLine(rc == FS_OK ? "OK" : "ERR format");
+	}
+	else if (isReboot) {
+		/* reboot <名字>  只重启那一个任务（它必须正在调度计划里）
+		 * reboot_all     重置整个堆并按 SCHEDULE 重新装载全部任务 */
+		if (isRebootAll || (sp[0] == 'a' && sp[1] == 'l' && sp[2] == 'l')) {
+			arssched_rebootAll();
+			putLine("OK");
+		} else if (!sp[0]) {
+			putLine("ERR args");
+		} else {
+			ars_i8 rc = arssched_restart(sp);
+			putLine(rc == FS_OK ? "OK" : "ERR noent");
+		}
 	}
 	else putLine("ERR unknown");
 }

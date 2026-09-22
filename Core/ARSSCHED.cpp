@@ -14,6 +14,7 @@
 #if USE_FILE_AND_UART
 
 uars_i8 gSchedTasks = 0;   /* 最近一次装载成功的任务数 */
+static char taskName[OS_MAX_TASK][NAME_LEN + 1]; /* 各槽位跑的是哪个文件，重启单个任务要靠它 */
 
 extern ars_i32 CalcResu[OS_MAX_TASK];
 extern int needJump[OS_MAX_TASK];
@@ -80,8 +81,10 @@ ars_i8 arssched_load(void) {
 		ARS_memset((void *)OS_EXE_LOAD_START(task), prog, (uars_i32)got);
 		call(0, (ars_i32 *)OS_EXE_LOAD_START(task), task);
 		needJump[task] = 0;
+		for (int j = 0; j <= NAME_LEN; j++) taskName[task][j] = name[j];
 		task++;
 	}
+	for (int t = task; t < OS_MAX_TASK; t++) taskName[t][0] = 0; /* 空槽位不留旧名字 */
 	gSchedTasks = task;
 	return (ars_i8)task;
 }
@@ -102,23 +105,56 @@ void arssched_loop(void) {
 	tid = (tid + 1) % OS_MAX_TASK;
 }
 
-/* 串口改过文件之后标记一下：下一轮 loop() 会重新装载。
- * 只由上位机的命令触发，不走字节码的 ABI —— 否则程序写个文件就把自己给重置了。 */
-static uars_i8 schedDirty = 0;
+/* 严格同名比较（ARS_strcmp 是"前缀匹配"，这里要的是全等）；同样不区分大小写 */
+static char taskLower(char c) {
+	if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+	return c;
+}
 
-void arssched_touch(void) { schedDirty = 1; }
+static int nameSame(const char *a, const char *b) {
+	for (int i = 0; i <= NAME_LEN; i++) {
+		if (taskLower(a[i]) != taskLower(b[i])) return 0;
+		if (!a[i]) return 1;
+	}
+	return 1;
+}
 
-void arssched_service(void) {
-	if (!schedDirty) return;
-	schedDirty = 0;
-	init_mem_info();  /* 停掉所有旧任务，并把它们占的堆整块作废 */
-	arssched_load();
+/* 该名字当前是否占着一个任务槽 */
+static int taskSlot(const char *name) {
+	for (int t = 0; t < OS_MAX_TASK; t++)
+		if (taskName[t][0] && nameSame(taskName[t], name)) return t;
+	return -1;
+}
+
+/* 重启单个任务：先把它占的内存整条拆掉（ReArrangeMemAndTask 会释放该任务的
+ * 所有块并清零槽位，且**不碰别的任务**），再从文件重新装载并重新 call()。
+ * 新程序先读进缓冲区，读失败就原样不动——不会把一个跑着的任务原地弄死。 */
+ars_i8 arssched_restart(const char *name) {
+	static uars_i8 prog[FILE_MAX];
+	int t = taskSlot(name);
+	if (t < 0) return FS_ENOENT;                     /* 不在调度计划里 */
+	long got = readFile(name, prog, FILE_MAX);
+	if (got <= 0) return FS_ENOENT;
+	if (got > OS_MAX_SGL_PG) return FS_ECORRUPT;     /* 超出任务代码页 */
+
+	ReArrangeMemAndTask((uars_i8)t);
+	ARS_memset((void *)OS_EXE_LOAD_START(t), prog, (uars_i32)got);
+	call(0, (ars_i32 *)OS_EXE_LOAD_START(t), (uars_i8)t);
+	needJump[t] = 0;
+	return FS_OK;
+}
+
+/* 全部重启：重置整个堆，再按 SCHEDULE 重新装载（也会重新读一遍调度表，
+ * 所以增删任务用这个）。 */
+ars_i8 arssched_rebootAll(void) {
+	init_mem_info();
+	return arssched_load();
 }
 
 #else
 uars_i8 gSchedTasks = 0;
 ars_i8 arssched_load(void) { return 0; }
 void arssched_loop(void) { }
-void arssched_touch(void) { }
-void arssched_service(void) { }
+ars_i8 arssched_restart(const char *name) { (void)name; return FS_ENOENT; }
+ars_i8 arssched_rebootAll(void) { return 0; }
 #endif

@@ -62,10 +62,11 @@ static void execOne(void) {
 }
 
 #if USE_FILE_AND_UART
-static void installDemos(void) {
+/* 把出厂示例铺进文件系统（首次启动、以及 format 之后调用）。
+ * 有内容就认为已经铺好了；但内容全 FF 说明那一页被擦掉了（写页时被复位），
+ * 这种情况下重新铺一遍，免得开机读不出调度表、一个任务都跑不起来。 */
+void ARS_provision(void) {
   static const uars_i8 sched[] = "LEDFLASH\nLEDSTREAM\n";
-  /* 有内容就认为已经铺好了；但内容全 FF 说明那一页被擦掉了（写页时被复位），
-   * 这种情况下重新铺一遍，免得开机读不出调度表、一个任务都跑不起来。 */
   uars_i8 probe[NAME_LEN];
   long n = readFile("SCHEDULE", probe, sizeof(probe));
   if (n > 0) {
@@ -89,11 +90,11 @@ static void deferredBoot(void) {
   static uars_i8 done = 0;
   if (done) return;
   done = 1;
-  delay(1500);      //等主机把描述符取完
-  init_mem_info();  //内存管理器必须先初始化，文件驱动模式同样需要
-  arsfs_init();     //挂载文件系统（未格式化则自动格式化）
-  installDemos();   //文件系统为空时写入内置示例
-  arssched_load();  //按 SCHEDULE 文件装载任务
+  delay(1500);       //等主机把描述符取完
+  init_mem_info();   //内存管理器必须先初始化，文件驱动模式同样需要
+  arsfs_init();      //挂载文件系统（未格式化则自动格式化）
+  ARS_provision();   //文件系统为空时写入出厂示例
+  arssched_load();   //按 SCHEDULE 文件装载任务
 }
 #endif
 
@@ -146,10 +147,9 @@ void setup() {
 void loop() {
 #if USE_FILE_AND_UART
   deferredBoot();
-  arssched_loop();     //轮转执行一条指令
-  arsuart_poll();      //处理串口命令（非阻塞）
-  arssched_service();  //串口改过文件就重置内存并重新装载（热更新）
-  ARS_alive();         //告诉停摆检测：主循环还在转
+  arssched_loop();  //轮转执行一条指令
+  arsuart_poll();   //处理串口命令（非阻塞）
+  ARS_alive();      //告诉停摆检测：主循环还在转
 #else
   execOne();
 #endif

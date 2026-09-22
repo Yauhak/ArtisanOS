@@ -25,12 +25,17 @@ static void namePack(ars_i8 *dst, const char *src) {
 	for (; i < NAME_LEN; i++) dst[i] = ' ';
 }
 
+static char nameLower(char c) {
+	if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+	return c;
+}
+
 static int nameEq(const ars_i8 *packed, const char *name) {
 	for (int i = 0; i < NAME_LEN; i++) {
 		char a = packed[i];
 		char b = name[i];
 		if (a == ' ') a = 0;
-		if (a != b) return 0;
+		if (nameLower(a) != nameLower(b)) return 0;
 		if (a == 0) return 1;
 	}
 	return 1;

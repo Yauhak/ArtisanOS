@@ -65,6 +65,13 @@ uars_i32 ARS_strtok(char *str, const char delim);
 float copyIntToFloat(int x);
 int copyFloatToInt(float x);
 
+/* 平台/应用层提供：让长等待期间能"报个平安"（RP2040 上是喂停摆检测）。
+ * 不实现也没关系——只有在 USE_FILE_AND_UART=1 时才会被调用。 */
+void ARS_alive(void);
+
+/* 平台/应用层提供：把出厂示例铺进文件系统（首次启动与 format 之后调用）。 */
+void ARS_provision(void);
+
 #include "ARSFS.h"
 #include "ARSSCHED.h"
 #include "ARSUART.h"
