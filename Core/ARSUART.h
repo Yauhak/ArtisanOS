@@ -14,7 +14,7 @@ extern "C" {
 void arsuart_begin(uars_i32 baud);
 void arsuart_poll(void);      /* 每轮调度调用一次，非阻塞 */
 void arsuart_tick(void);      /* 兼容别名 */
-void arsuart_wdtReport(uars_i8 flag); /* 平台层告知：本次启动是否由看门狗超时引起 */
+void arsuart_txBegin(void);   /* 开始一条应答：作废上一条没人要的积压 */
 
 #ifdef __cplusplus
 }

@@ -48,28 +48,12 @@ static int pgCount(long len) {
 	return len > 0 ? (int)((len + PG - 1) / PG) : 0;
 }
 
-#define PG_PER_SEC (SECTOR / PG)
-
 static int pgAlloc(void) {
 	for (int i = 0; i < BMP; i++)
 		if (meta.nextPg[i] == FREE_OR_DEL) {
 			meta.nextPg[i] = EOF_PG;
 			return i;
 		}
-	return -1;
-}
-
-static int pgAllocSector(int pages) {
-	if (pages <= 0 || pages > PG_PER_SEC) return -1;
-	for (int s = 0; s < BMP; s += PG_PER_SEC) {
-		int i = 0;
-		for (; i < PG_PER_SEC; i++)
-			if (meta.nextPg[s + i] != FREE_OR_DEL) break;
-		if (i < PG_PER_SEC) continue;
-		for (i = 0; i < pages; i++)
-			meta.nextPg[s + i] = (i + 1 < pages) ? (uars_i8)(s + i + 1) : EOF_PG;
-		return s;
-	}
 	return -1;
 }
 
@@ -279,26 +263,15 @@ static ars_i8 writeFileAt(int idx, const uars_i8 *src, long len) {
 	int pages = pgCount(len);
 	int head = -1, prev = -1;
 	long done = 0;
-	int sect = pgAllocSector(pages);
-	if (sect >= 0 && arsfs_flash_erase(pgOffset((uars_i8)sect), SECTOR) != FS_OK) {
-		pgFreeChain(sect);
-		metaFlush();
-		return FS_EIO;
-	}
 	for (int i = 0; i < pages; i++) {
-		int p;
-		if (sect >= 0) {
-			p = sect + i;
-		} else {
-			p = pgAlloc();
-			if (p < 0) {
-				pgFreeChain(head);
-				metaFlush();
-				return FS_EFULL;
-			}
-			if (prev >= 0) meta.nextPg[prev] = (uars_i8)p;
-			meta.nextPg[p] = EOF_PG;
+		int p = pgAlloc();
+		if (p < 0) {
+			pgFreeChain(head);
+			metaFlush();
+			return FS_EFULL;
 		}
+		if (prev >= 0) meta.nextPg[prev] = (uars_i8)p;
+		meta.nextPg[p] = EOF_PG;
 		if (head < 0) head = p;
 		prev = p;
 
@@ -306,9 +279,7 @@ static ars_i8 writeFileAt(int idx, const uars_i8 *src, long len) {
 		if (chunk > PG) chunk = PG;
 		for (int k = 0; k < PG; k++) pgBuf[k] = 0xFF;
 		ARS_memset(pgBuf, src + done, (uars_i32)chunk);
-		ars_i8 rc = (sect >= 0) ? arsfs_hw_write(pgOffset((uars_i8)p), pgBuf, PG)
-		                        : arsfs_flash_write(pgOffset((uars_i8)p), pgBuf, PG);
-		if (rc != FS_OK) {
+		if (arsfs_flash_write(pgOffset((uars_i8)p), pgBuf, PG) != FS_OK) {
 			pgFreeChain(head);
 			metaFlush();
 			return FS_EIO;

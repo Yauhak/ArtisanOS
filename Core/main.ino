@@ -2,12 +2,6 @@
 #include "Memory.h"
 #include "ByteCode.h"
 
-#if USE_FILE_AND_UART
-#include <hardware/watchdog.h>
-#include "pico.h"
-#include "drivers/Ticker.h"
-#endif
-
 extern ars_i32 CalcResu[OS_MAX_TASK];
 extern int needJump[OS_MAX_TASK];
 extern volatile uars_i8 *CurCmd[OS_MAX_TASK];
@@ -15,7 +9,7 @@ extern volatile uars_i8 *CurCmd[OS_MAX_TASK];
 /* ==========================================================================
  * 两种运行方式，由 USE_FILE_AND_UART 切换（定义在 IO_INCLUDE.h）：
  *
- *   0（默认）固件内置模式：字节码随固件烧录在 ByteCode.h 里，直接装载运行。
+ *   0 固件内置模式：字节码随固件烧录在 ByteCode.h 里，直接装载运行。
  *   1 文件驱动模式：从文件系统读取 FCB[0]（SCHEDULE），按行装载多个文件轮转执行，
  *                   并启用串口命令 update/get/del/ls/occ 与字节码的文件 ABI。
  * ========================================================================== */
@@ -63,7 +57,7 @@ static void execOne(void) {
 
 #if USE_FILE_AND_UART
 /* 把出厂示例铺进文件系统（首次启动、以及 format 之后调用）。
- * 有内容就认为已经铺好了；但内容全 FF 说明那一页被擦掉了（写页时被复位），
+ * 有内容就认为已经铺好了；但内容全是 FF 说明那些页早先被擦掉了，
  * 这种情况下重新铺一遍，免得开机读不出调度表、一个任务都跑不起来。 */
 void ARS_provision(void) {
   static const uars_i8 sched[] = "LEDFLASH\nLEDSTREAM\n";
@@ -98,42 +92,8 @@ static void deferredBoot(void) {
 }
 #endif
 
-/* 主循环"停摆"检测 */
-#if USE_FILE_AND_UART
-#define ARS_STALL_MAGIC 0x57445431UL  /* 'WDT1' */
-#define ARS_STALL_TICK_MS 500
-#define ARS_STALL_MAX 10  /* 连续 10 个检查周期没进展 = 5 秒 → 复位 */
-
-static volatile uars_i32 gLoopSeen = 0;
-static volatile uars_i32 gSeenLast = 0;
-static volatile uars_i32 gStallCnt = 0;
-static uars_i32 __uninitialized_ram(gStallMark);  /* 能跨复位存活，用来记录"上次是被我重启的" */
-
-void ARS_alive(void) {
-  gLoopSeen++;  /* 长等待里也要报平安，否则慢速上传会被误判成卡死 */
-}
-
-static void stallCheck(void) {
-  if (gLoopSeen != gSeenLast) {
-    gSeenLast = gLoopSeen;
-    gStallCnt = 0;
-    return;
-  }
-  if (++gStallCnt >= ARS_STALL_MAX) {
-    gStallMark = ARS_STALL_MAGIC;
-    watchdog_reboot(0, 0, 0);
-  }
-}
-#endif
-
 void setup() {
 #if USE_FILE_AND_UART
-  arsuart_wdtReport((gStallMark == ARS_STALL_MAGIC) ? 1 : 0);
-  gStallMark = 0;
-  {
-    static mbed::Ticker stallTicker;
-    stallTicker.attach(&stallCheck, ARS_STALL_TICK_MS / 1000.0f);
-  }
   arsuart_begin(115200);
 #else
   //Serial.begin(115200);
@@ -149,7 +109,6 @@ void loop() {
   deferredBoot();
   arssched_loop();  //轮转执行一条指令
   arsuart_poll();   //处理串口命令（非阻塞）
-  ARS_alive();      //告诉停摆检测：主循环还在转
 #else
   execOne();
 #endif

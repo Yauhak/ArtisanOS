@@ -12,17 +12,71 @@
 #if USE_FILE_AND_UART
 
 #include <Arduino.h>
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+	#include <USB/PluggableUSBSerial.h>
+#endif
 
 #define CMD_MAX 64
 #define UART_CHUNK 128
+
+/* ---- 非阻塞串口输出 ----*/
+#define TX_RING 8192u
+#define TX_KEEP 1024u 
+#define TX_PKT 63u
+#define POLL_MAX_CMD 4 /* 一次 poll 最多处理几条命令 */
+
+static char txRing[TX_RING];
+static uars_i32 txHead = 0, txTail = 0;
+static uars_i8 txOver = 0;
+
+static uars_i32 txBacklog(void) {
+	return (txHead >= txTail) ? (txHead - txTail) : (TX_RING - txTail + txHead);
+}
+
+void arsuart_txBegin(void) {
+	if (txBacklog() > TX_KEEP) txTail = txHead; /* 丢弃上一条没人要的应答 */
+	txOver = 0;
+}
+
+static void txPut(const char *s, uars_i32 n) {
+	if (txOver) return;
+	for (uars_i32 i = 0; i < n; i++) {
+		uars_i32 nx = txHead + 1;
+		if (nx >= TX_RING) nx = 0;
+		if (nx == txTail) { txOver = 1; return; } /* 满了：这条应答剩下的部分不要了 */
+		txRing[txHead] = s[i];
+		txHead = nx;
+	}
+}
+
+static void txDrain(void) {
+	if (txHead == txTail) return;
+	uars_i32 avail = (txHead > txTail) ? (txHead - txTail) : (TX_RING - txTail);
+	if (avail > (uars_i32)TX_PKT) avail = (uars_i32)TX_PKT;
+#if defined(ARDUINO_ARCH_RP2040) || defined(PICO_ON_DEVICE)
+	uint32_t got = 0;
+	_SerialUSB.send_nb((uint8_t *)(txRing + txTail), (uint32_t)avail, &got, true);
+	if (!got) return; /* 上一包还没被宿主取走，下一轮再来 */
+	txTail += (uars_i32)got;
+#else
+	for (uars_i32 i = 0; i < avail; i++) Serial.write((uars_i8)txRing[txTail + i]);
+	txTail += avail;
+#endif
+	if (txTail >= TX_RING) txTail = 0;
+}
+
+static void txStr(const char *s) {
+	uars_i32 n = 0;
+	while (s[n]) n++;
+	txPut(s, n);
+}
+
+static void txChar(char c) { txPut(&c, 1); }
 
 static char cmdBuf[CMD_MAX];
 static uars_i16 cmdLen = 0;
 static uars_i8 upBuf[FILE_MAX];   /* 上传暂存 */
 static uars_i8 downBuf[FILE_MAX]; /* 下载暂存 */
-static uars_i8 wdtReset = 0;      /* 上次复位是不是看门狗超时（卡死自恢复的痕迹） */
-
-void arsuart_wdtReport(uars_i8 flag) { wdtReset = flag; }
 
 /* ---- 不依赖 snprintf 的数字输出 ---- */
 static void putU32(uars_i32 v) {
@@ -30,44 +84,53 @@ static void putU32(uars_i32 v) {
 	int n = 0;
 	if (!v) t[n++] = '0';
 	while (v) { t[n++] = (char)('0' + v % 10); v /= 10; }
-	while (n--) Serial.write((uars_i8)t[n]);
+	while (n--) txChar(t[n]);
 }
-static void putLine(const char *s) { Serial.print(s); Serial.print("\r\n"); }
+/* 一条命令失败时，把接收缓冲里剩下的东西扔掉。 */
+static void rxFlush(void) {
+	unsigned long t0 = millis();
+	while ((millis() - t0) < 120) {
+		if (Serial.available()) { (void)Serial.read(); t0 = millis(); }
+	}
+	cmdLen = 0;
+}
+
+static void putLine(const char *s) { txStr(s); txStr("\r\n"); }
 
 /* ---- FLASH 拓扑：占用标红、空闲标绿 ---- */
 static void printOcc(int color) {
-	Serial.print("USED ");
+	txStr("USED ");
 	putU32((uars_i32)arsfs_used());
-	Serial.print(" FREE ");
+	txStr(" FREE ");
 	putU32((uars_i32)arsfs_free());
-	Serial.print(color ? " (red=used green=free)\r\n" : " (*=used .=free)\r\n");
+	txStr(color ? " (red=used green=free)\r\n" : " (*=used .=free)\r\n");
 	for (int i = 0; i < BMP; i++) {
 		int u = arsfs_page_used(i);
-		if (color) Serial.print(u ? "\x1b[31m" : "\x1b[32m"); /* 红占用 / 绿空闲 */
-		Serial.write((uars_i8)('0' + i / 100 % 10));
-		Serial.write((uars_i8)('0' + i / 10 % 10));
-		Serial.write((uars_i8)('0' + i % 10));
-		if (color) Serial.print("\x1b[0m");
-		else Serial.write((uars_i8)(u ? '*' : '.'));
-		Serial.print((i % 8 == 7) ? "\r\n" : " ");
+		if (color) txStr(u ? "\x1b[31m" : "\x1b[32m"); /* 红占用 / 绿空闲 */
+		txChar((char)('0' + i / 100 % 10));
+		txChar((char)('0' + i / 10 % 10));
+		txChar((char)('0' + i % 10));
+		if (color) txStr("\x1b[0m");
+		else txChar(u ? '*' : '.');
+		txStr((i % 8 == 7) ? "\r\n" : " ");
 	}
 	/* FCB 一览：start 为 FREE_OR_DEL 表示该目录项空闲 */
-	Serial.print("FCB:\r\n");
+	txStr("FCB:\r\n");
 	for (int i = 0; i < FCB_CNT; i++) {
 		int st = arsfs_fcb_start(i);
-		if (color) Serial.print(st == FREE_OR_DEL ? "\x1b[32m" : "\x1b[31m");
+		if (color) txStr(st == FREE_OR_DEL ? "\x1b[32m" : "\x1b[31m");
 		if (st == FREE_OR_DEL) {
-			Serial.print("FREE_OR_DEL");
+			txStr("FREE_OR_DEL");
 		} else {
 			for (int k = 0; k < NAME_LEN && arsfs_fcb_name(i, k) != ' '; k++)
-				Serial.write((uars_i8)arsfs_fcb_name(i, k));
-			Serial.print(" start=");
+				txChar(arsfs_fcb_name(i, k));
+			txStr(" start=");
 			putU32((uars_i32)st);
-			Serial.print(" size=");
+			txStr(" size=");
 			putU32((uars_i32)arsfs_fcb_size(i));
 		}
-		if (color) Serial.print("\x1b[0m");
-		Serial.print("\r\n");
+		if (color) txStr("\x1b[0m");
+		txStr("\r\n");
 	}
 }
 
@@ -77,34 +140,39 @@ static void handleUpdate(char *args) {
 	while (*sp == ' ') sp++;
 	char *name = sp;
 	while (*sp && *sp != ' ') sp++;
-	if (!*sp) { putLine("ERR args"); return; }
+	if (!*sp) { putLine("ERR args"); rxFlush(); return; }
 	*sp++ = 0;
 	while (*sp == ' ') sp++;
 	long len = 0;
 	while (*sp >= '0' && *sp <= '9') len = len * 10 + (*sp++ - '0');
-	if (len < 0 || len > FILE_MAX) { putLine("ERR size"); return; }
+	if (len < 0 || len > FILE_MAX) { putLine("ERR size"); rxFlush(); return; }
 
-	Serial.print("RDY\r\n");
+	arsuart_txBegin();
+	txStr("RDY\r\n");
+	txDrain(); /* 主机在等 RDY，先把这一包推出去 */
 	long got = 0;
 	while (got < len) {
 		long want = len - got;
 		if (want > UART_CHUNK) want = UART_CHUNK;
 		long n = 0;
 		unsigned long t0 = millis();
-		while (n < want && (millis() - t0) < 2000) {
+		while (n < want && (millis() - t0) < 5000) {
 			if (Serial.available()) { upBuf[got + n] = (uars_i8)Serial.read(); n++; t0 = millis(); }
-			ARS_alive();
+			txDrain(); 
 		}
-		if (n < want) { putLine("ERR timeout"); return; }
+		if (n < want) { putLine("ERR timeout"); rxFlush(); return; }
 		got += n;
-		Serial.print("ACK ");
+		arsuart_txBegin();
+		txStr("ACK ");
 		putU32((uars_i32)got);
-		Serial.print("\r\n");
+		txStr("\r\n");
+		txDrain();
 	}
 	arsfs_lock();
 	createFile(name); /* 不存在则先建目录项：writeFile 只负责写已有文件 */
 	ars_i8 rc = writeFile(name, (uars_i8 *)upBuf, len);
 	arsfs_unlock();
+	arsuart_txBegin();
 	putLine(rc == FS_OK ? "OK" : "ERR write");
 }
 
@@ -119,17 +187,17 @@ static void handleGet(char *args) {
 	long n = readFile(name, (uars_i8 *)downBuf, FILE_MAX);
 	arsfs_unlock();
 	if (n < 0) { putLine("ERR noent"); return; }
-	Serial.print("DATA ");
+	txStr("DATA ");
 	putU32((uars_i32)n);
-	Serial.print("\r\n");
+	txStr("\r\n");
 	const char *hex = "0123456789ABCDEF";
 	for (long i = 0; i < n; i++) {
 		uars_i8 b = downBuf[i];
-		Serial.write((uars_i8)hex[(b >> 4) & 0xF]);
-		Serial.write((uars_i8)hex[b & 0xF]);
-		if ((i & 31) == 31) Serial.print("\r\n");
+		txChar(hex[(b >> 4) & 0xF]);
+		txChar(hex[b & 0xF]);
+		if ((i & 31) == 31) txStr("\r\n");
 	}
-	Serial.print("\r\nOK\r\n");
+	txStr("\r\nOK\r\n");
 }
 
 static void handleDel(char *args) {
@@ -149,9 +217,9 @@ static void handleLs(void) {
 	arsfs_lock();
 	arsfs_ls(buf, sizeof(buf));
 	arsfs_unlock();
-	Serial.print("LS\r\n");
-	Serial.print(buf);
-	Serial.print("OK\r\n");
+	txStr("LS\r\n");
+	txStr(buf);
+	txStr("OK\r\n");
 }
 
 /* ---- 命令分发 ---- */
@@ -162,7 +230,9 @@ static void dispatch(char *line) {
 	while (*sp && *sp != ' ') sp++;
 	if (*sp) *sp++ = 0;
 	if (!cmd[0]) return;
-	/* 命令词统一转小写：终端上大小写混着敲都能用 */
+	for (char *p = cmd; *p; p++)
+		if ((unsigned char)*p < 0x20 || (unsigned char)*p > 0x7E) { rxFlush(); return; }
+	arsuart_txBegin();
 	for (char *p = cmd; *p; p++)
 		if (*p >= 'A' && *p <= 'Z') *p += 'a' - 'A';
 	/* ARS_strcmp 返回 0 表示前 len 个字节相同 */
@@ -181,13 +251,11 @@ static void dispatch(char *line) {
 	else if (isDel) handleDel(sp);
 	else if (isLs) handleLs();
 	else if (isVer) {
-		Serial.print("ARS FS_VER=");
+		txStr("ARS FS_VER=");
 		putU32(FS_VER);
-		Serial.print(" TASKS=");
+		txStr(" TASKS=");
 		putU32((uars_i32)gSchedTasks);
-		Serial.print(" WDT=");
-		putU32((uars_i32)wdtReset);
-		putLine("");
+		txStr("\r\n");
 	}
 	else if (isOcc) {
 		/* occ 走 ANSI 颜色；occ text 输出不含任何转义码的纯文本 */
@@ -226,24 +294,30 @@ static void dispatch(char *line) {
 
 void arsuart_begin(uars_i32 baud) {
 	Serial.begin(baud);
-	/* 给 USB 串口一点枚举时间；不依赖 !Serial，避免无宿主机时卡死启动 */
 	unsigned long t0 = millis();
 	while ((millis() - t0) < 300) { }
 	cmdLen = 0;
+	txHead = 0;
+	txTail = 0;
+	txOver = 0;
 }
 
 void arsuart_poll(void) {
-	while (Serial.available()) {
+	txDrain();
+	int served = 0;
+	while (Serial.available() && served < POLL_MAX_CMD) {
 		char c = (char)Serial.read();
 		if (c == '\r') continue;
 		if (c == '\n') {
 			cmdBuf[cmdLen] = 0;
 			dispatch(cmdBuf);
 			cmdLen = 0;
+			served++;
 		} else if (cmdLen < CMD_MAX - 1) {
 			cmdBuf[cmdLen++] = c;
 		}
 	}
+	txDrain();
 }
 
 void arsuart_tick(void) { arsuart_poll(); }
@@ -252,4 +326,5 @@ void arsuart_tick(void) { arsuart_poll(); }
 void arsuart_begin(uars_i32 baud) { (void)baud; }
 void arsuart_poll(void) { }
 void arsuart_tick(void) { }
+void arsuart_txBegin(void) { }
 #endif
