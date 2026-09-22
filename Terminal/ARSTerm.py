@@ -2,10 +2,10 @@
 """ARSFS 串口终端：与 RP2040 上的 ArtisanOS 通信、收发文件。
 
 用法：
-    python ars_term.py [串口] [--baud 115200]
+    python ARSTerm.py [串口] [--baud 115200]
 例如：
-    python ars_term.py COM3
-    python ars_term.py /dev/ttyACM0
+    python ARSTerm.py COM3
+    python ARSTerm.py /dev/ttyACM0
 
 交互命令：
     update <localfile> <dest_name>   上传文件，不存在则创建
@@ -14,6 +14,9 @@
     ls                               列出文件
     occ [text]                       查看 FLASH 占用（空闲绿 / 占用红；text=纯文本）
     ver                              查询固件元数据版本与已装载任务数
+    reboot <name>                    重启调度计划里的某一个任务（改了程序后用这个）
+    reboot_all                       重置整个堆并按 SCHEDULE 重新装载全部任务
+    format                           恢复出厂设置：清空文件系统并铺回出厂示例（会二次确认）
     help / quit
 
 依赖：pyserial      pip install pyserial
@@ -129,6 +132,18 @@ class ArsfsTerm:
         self.write_line("ver")
         print("  " + (self.read_line() or "超时"))
 
+    def cmd_reboot(self, line):
+        """把整行原样发过去（reboot <name> 或 reboot_all）"""
+        self.write_line(line)
+        print("  " + (self.read_line() or "超时"))
+
+    def cmd_format(self):
+        if input("  确认恢复出厂设置？会清空所有文件 (y/N): ").strip().lower() != "y":
+            print("  已取消")
+            return
+        self.write_line("format")
+        print("  " + (self.read_line(15.0) or "超时"))
+
     def cmd_del(self, name):
         self.write_line(f"del {name}")
         line = self.read_line()
@@ -222,7 +237,7 @@ def main():
         except ImportError:
             ports = []
         if not ports:
-            print("未指定串口，且未发现可用设备。用法：python ars_term.py COM3")
+            print("未指定串口，且未发现可用设备。用法：python ARSTerm.py COM3")
             return
         print("可用串口：")
         for p in ports:
@@ -257,6 +272,10 @@ def main():
                 term.cmd_occ(" ".join(parts[1:]))
             elif cmd == "ver":
                 term.cmd_ver()
+            elif cmd in ("reboot", "reboot_all", "rebootall", "restart", "restart_all"):
+                term.cmd_reboot(line)
+            elif cmd == "format":
+                term.cmd_format()
             elif cmd == "del" and len(parts) >= 2:
                 term.cmd_del(parts[1])
             elif cmd == "update" and len(parts) >= 3:
