@@ -176,7 +176,6 @@ int arssched_count(void) { return aliveCount(); }
 ars_i8 arssched_start(const char *name) {
 	static uars_i8 prog[FILE_MAX];
 	if (!name || !name[0]) return FS_ENOENT;
-	if (taskSlot(name) >= 0) return FS_EBUSY;    /* 已经在跑，不重复起 */
 	int t = freeSlot();
 	if (t < 0) return FS_EFULL;                  /* 8 个槽位都占着 */
 	long got = readFile(name, prog, FILE_MAX);
@@ -205,8 +204,6 @@ ars_i8 arssched_killId(uars_i8 id) {
 }
 
 /* 按名字杀：所有同名任务一起杀。
- * 同名是可以出现的——SCHEDULE 里同一个文件名写两行就会装出两个同名任务，
- * 所以这里要把 8 个槽位全扫一遍，而不是遇到第一个就收手。
  * 只要杀掉了至少一个就算成功。 */
 ars_i8 arssched_kill(const char *name) {
 	if (!name || !name[0]) return FS_ENOENT;
