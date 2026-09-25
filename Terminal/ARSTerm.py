@@ -14,6 +14,10 @@
     ls                               列出文件
     occ [text]                       查看 FLASH 占用（空闲绿 / 占用红；text=纯文本）
     ver                              查询固件元数据版本与已装载任务数
+    start <name>                     手动启动一个存放在 FLASH 中的任务
+    kill <name>                      终止所有同名任务（只杀实例，文件与 SCHEDULE 都不动）
+    killid <ID>                      按任务 ID 终止一个（ID 就是槽位号，用 tasks 查）
+    tasks                            列出当前存活任务与它们的 ID
     reboot <name>                    重启调度计划里的某一个任务（改了程序后用这个）
     reboot_all                       重置整个堆并按 SCHEDULE 重新装载全部任务
     format                           恢复出厂设置：清空文件系统并铺回出厂示例（会二次确认）
@@ -59,6 +63,7 @@ class ArsfsTerm:
         每条命令之前都做一次：只要有一点点残留在缓冲里，`read_line` 就会读到
         **上一条命令的应答**，之后每条命令都错开一位——症状是"每次报的错都不一样"。
         """
+        """
         t_end = time.time() + limit
         last = time.time()
         while time.time() < t_end:
@@ -66,6 +71,7 @@ class ArsfsTerm:
                 last = time.time()
             elif time.time() - last >= quiet:
                 break
+        """
 
     def write_line(self, s: str):
         self.ser.write(s.encode() + b"\n")
@@ -132,7 +138,6 @@ class ArsfsTerm:
     def cmd_occ(self, extra=""):
         self.drain()
         self.write_line(("occ " + extra).strip())
-        color = False
         while True:
             line = self.read_line()
             if line is None:
@@ -163,6 +168,37 @@ class ArsfsTerm:
         self.drain()
         self.write_line("ver")
         print("  " + (self.read_line() or "超时"))
+
+    def cmd_start(self, name):
+        self.drain()
+        self.write_line(f"start {name}")
+        print("  " + (self.read_line() or "超时"))
+
+    def cmd_kill(self, name):
+        self.drain()
+        self.write_line(f"kill {name}")
+        print("  " + (self.read_line() or "超时"))
+
+    def cmd_killid(self, tid):
+        self.drain()
+        self.write_line(f"killid {tid}")
+        print("  " + (self.read_line() or "超时"))
+
+    def cmd_tasks(self):
+        """列出存活任务：TASKS <n> → 每行 "<ID> <名字>" → OK"""
+        self.drain()
+        self.write_line("tasks")
+        while True:
+            line = self.read_line()
+            if line is None:
+                print("  超时")
+                return
+            if line.startswith("TASKS"):
+                print("  当前存活 " + line[5:].strip() + " 个任务：")
+                continue
+            if line == "OK":
+                return
+            print("  " + line)
 
     def cmd_reboot(self, line):
         """把整行原样发过去（reboot <name> 或 reboot_all）"""
@@ -202,7 +238,7 @@ class ArsfsTerm:
             return
         sent = 0
         while sent < len(data):
-            chunk = data[sent:sent + MAX_CHUNK]
+            chunk = data[sent : sent + MAX_CHUNK]
             self.ser.write(chunk)
             self.ser.flush()
             ack, _ = self.wait_for(["ACK", "ERR"], timeout=6.0)
@@ -239,20 +275,23 @@ class ArsfsTerm:
             self.drain()
             return
         # 读回 n 个字节的 HEX 文本（设备每 32 字节换一次行），读到 OK 为止
-        hexbuf = ""
+        buf = ""
         t0 = time.time()
-        while len(hexbuf) < n * 2 and time.time() - t0 < 20:
+        while len(buf) < n and time.time() - t0 < 20:
             l = self.read_line(2.0)
             if l is None or l == "OK":
                 break
-            hexbuf += "".join(ch for ch in l if ch in "0123456789abcdefABCDEF")
-        if len(hexbuf) < n * 2:
-            print("  数据不完整，已接收 %d/%d 字节" % (len(hexbuf) // 2, n))
+            for i in range(0, int(len(l) / 2)):
+                buf += "".join(chr(int(l[i * 2] + l[i * 2 + 1], 16)))
+        if len(buf) < n:
+            print("  数据不完整，已接收 %d/%d 字节" % (len(buf), n))
             self.drain(quiet=0.3)
-        raw = bytes.fromhex(hexbuf[: n * 2])
-        fname = f"{random.randint(0, 0xFFFFFFFF):08X}.txt"
+        fname = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"{random.randint(0, 0xFFFFFFFF):08X}.txt",
+        )
         with open(fname, "w", encoding="utf-8") as f:
-            f.write(raw.hex().upper())
+            f.write(buf)
         print(f"  已保存 {n} 字节到 {fname}")
 
 
@@ -263,12 +302,15 @@ def enable_ansi():
         return True
     try:
         import ctypes
+
         k = ctypes.windll.kernel32
         h = k.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
         mode = ctypes.c_uint32()
         if not k.GetConsoleMode(h, ctypes.byref(mode)):
             return False
-        return bool(k.SetConsoleMode(h, mode.value | 0x0004))  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        return bool(
+            k.SetConsoleMode(h, mode.value | 0x0004)
+        )  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
     except Exception:
         return False
 
@@ -285,6 +327,7 @@ def main():
     if not port:
         try:
             from serial.tools import list_ports
+
             ports = list(list_ports.comports())
         except ImportError:
             ports = []
@@ -332,6 +375,14 @@ def main():
                 term.cmd_occ(" ".join(parts[1:]))
             elif cmd == "ver":
                 term.cmd_ver()
+            elif cmd == "tasks":
+                term.cmd_tasks()
+            elif cmd == "start" and len(parts) >= 2:
+                term.cmd_start(parts[1])
+            elif cmd == "kill" and len(parts) >= 2:
+                term.cmd_kill(parts[1])
+            elif cmd == "killid" and len(parts) >= 2:
+                term.cmd_killid(parts[1])
             elif cmd in ("reboot", "reboot_all", "rebootall", "restart", "restart_all"):
                 term.cmd_reboot(line)
             elif cmd == "format":
