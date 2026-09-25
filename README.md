@@ -52,13 +52,15 @@ with an on-chip filesystem that the scheduler reads its task list from.
 | `Core/Memory.cpp/.h` | ❌ 纯 C。仅操作字节缓冲区 |
 | `Core/INTERPRETER.cpp/.h` | ❌ 纯 C。只做指令译码与内存访问 |
 | `Core/ARSSCHED.cpp/.h` | ❌ 纯 C。只依赖文件系统与解释器的公开接口 |
+| `Core/ARSCMD.cpp/.h` | ❌ 纯 C。命令与协议全在这里，只调 `ARSUART` 的收发原语 + 文件系统/调度器 |
 | `Core/ARSFS.cpp/.h` | ⚠️ 平台无关，但需要目标平台提供 3 个硬件原语 `arsfs_hw_read` / `arsfs_hw_erase` / `arsfs_hw_write`（RP2040 的实现已内置） |
-| `Core/ARSUART.cpp/.h` | ⚠️ 依赖 `Serial`（Arduino 串口 API）。移植时换成任意串口抽象即可 |
+| `Core/ARSUART.cpp/.h` | ⚠️ 串口传输层：依赖 `Serial`（Arduino 串口 API）。换链路（UART / TCP / 假串口）只改这一个文件，命令层不用动 |
 | `Core/ByteCode.h` | ❌ 就是一个 `const unsigned char[]` |
 | `Core/Glue.h` | ✅ **唯一**包含 `<Arduino.h>` 的地方（`pinMode`/`digitalWrite`/`digitalRead`/`millis`） |
 | `Core/main.ino` | ✅ 平台入口：装载任务、提供调度节拍 |
 
-**必须改写的只有两个文件**（`Glue.h`、`main.ino`），外加一处串口映射。其余原样编译。
+**必须改写的只有两个文件**（`Glue.h`、`main.ino`），外加一处串口映射（`ARSUART.cpp`）。
+其余原样编译。
 
 ### 2. 字节码与架构无关，一次编译到处运行
 
@@ -192,7 +194,8 @@ ArtisanOS/
 │   ├── ByteCode.h
 │   ├── ARSFS.cpp/.h
 │   ├── ARSSCHED.cpp/.h
-│   └── ARSUART.cpp/.h
+│   ├── ARSUART.cpp/.h
+│   └── ARSCMD.cpp/.h
 ├── Compiler/
 │   ├── Demo/
 │   │   ├── LEDFlash.txt
@@ -207,7 +210,29 @@ ArtisanOS/
 └── LICENSE
 ```
 
-> 上位机终端就在 Terminal 文件夹下：`python ARSTerm.py COM4`。
+> 上位机终端在 `Terminal/` 下：`python Terminal/ARSTerm.py COM4`。
+
+### 串口层与命令层是两个独立模块
+
+`ARSUART`（传输）和 `ARSCMD`（命令）**互不 include、互不认识**，只靠一个回调接起来：
+
+```
+ARSUART  ── 只做字节进出 ──────────────────────────────
+  arsuart_begin / poll            推发送缓冲 + 把收到的字节拼成整行
+  arsuart_puts / putc / putu32    发送：只排队，绝不等待宿主
+  arsuart_rxAvail / rxGet / rxFlush  接收：给命令层收二进制块用
+  arsuart_setLineHandler(fn)      ← 整行回调挂在这里
+                    ↑
+                    │  main.ino 里一行接线：
+                    │  arsuart_setLineHandler(arscmd_line);
+                    ↓
+ARSCMD   ── 只做协议与业务 ────────────────────────────
+  arscmd_line(line)               收行 → 认命令 → 调 ARSFS / ARSSCHED
+```
+
+好处是两边都能单独替换和单独测试：换物理链路（UART / TCP / 假串口）只动 `ARSUART`，
+加命令只动 `ARSCMD`；离线测试也可以只链 `ARSUART`（不注册回调就什么命令都不处理）。
+命令层的所有应答都只用 `arsuart_put*` 这几个原语，所以它根本不知道底下是 USB 还是别的。
 
 ---
 
@@ -236,7 +261,7 @@ gcc Compiler/Source/Compiler.c -o arscc
 
 ```c
 #ifndef USE_FILE_AND_UART
-	#define USE_FILE_AND_UART 1     /* 0 = 固件内置模式，1 = 文件驱动模式 */
+  #define USE_FILE_AND_UART 1     /* 0 = 固件内置模式，1 = 文件驱动模式 */
 #endif
 ```
 
@@ -245,12 +270,13 @@ gcc Compiler/Source/Compiler.c -o arscc
 | | `0` 固件内置模式 | `1` 文件驱动模式（当前默认） |
 |---|---|---|
 | 程序来源 | `ByteCode.h` 里的数组，随固件烧录 | FLASH 文件系统里的文件 |
-| 需要的组件 | 解释器 + 内存管理器 | 再加上 `ARSFS` / `ARSUART` / `ARSSCHED` |
+| 需要的组件 | 解释器 + 内存管理器 | 再加上 `ARSFS` / `ARSSCHED` / `ARSUART` / `ARSCMD` |
 | 任务表 | `main.ino` 里写死 | 读 `SCHEDULE` 文件，每行一个文件名 |
 | 外设通道 | `abi_invoke 0/1/2`（GPIO、定时器） | 再加 `3/4/5/6`（文件读写） |
 
-关掉开关时 `ARSFS.cpp` 会整个编译成空文件——文件系统的接口只被 `ARSUART` / `ARSSCHED` /
-`Glue.h` 内部使用，而它们各自的 `#else` 已经把这条路堵死了。所以**不留空实现**：
+关掉开关时 `ARSFS.cpp`、`ARSUART.cpp`、`ARSCMD.cpp` 都会整个编译成空文件——文件系统的
+接口只被 `ARSCMD` / `ARSSCHED` / `Glue.h` 内部使用，而它们各自的 `#else` 已经把这条路
+堵死了。所以**不留空实现**：
 万一将来有人在关闭状态下误用，会在**链接期**直接报未定义符号，而不是运行期悄悄返回 `FS_EIO`。
 唯一必须保留空实现的是 `Glue.h` 的那四个 `gFile*`，因为字节码的 ABI 表是**无条件编译**的。
 
@@ -358,10 +384,10 @@ FLASH 的擦除粒度是 **4KB 扇区**，比页大 8 倍，"改一个页"实际
 
 ```c
 typedef struct FCB {
-	ars_i8  fileName[15];   /* 定长 15 字节，不足用空格补齐，无扩展名 */
-	uars_i8 start;          /* 首页下标；FREE_OR_DEL 空闲，EOF_PG 空文件 */
-	ars_i16 size;           /* 实际长度（字节） */
-	uars_i8 attr;           /* 预留属性位 */
+  ars_i8  fileName[15];   /* 定长 15 字节，不足用空格补齐，无扩展名 */
+  uars_i8 start;          /* 首页下标；FREE_OR_DEL 空闲，EOF_PG 空文件 */
+  ars_i16 size;           /* 实际长度（字节） */
+  uars_i8 attr;           /* 预留属性位 */
 } FCB;                      /* 20 字节 */
 ```
 
@@ -455,15 +481,19 @@ LEDSTREAM
 
 于是"改任务列表"不需要重新编译固件，只要用串口改一个文件。
 
-### 重启任务 | Restarting tasks
+### 重启 / 起停任务 | Restart / start / kill
 
 **上传文件不会自动重启任何东西**——`update` / `del` / `format` 只改 FLASH，
 跑着的任务照旧。要生效就在终端里下命令：
 
 | 命令 | 作用 |
 |---|---|
-| `reboot <名字>` | **只重启这一个任务**，别的任务完全不受影响（指针都不动）。名字必须正在调度计划里（即出现在 `SCHEDULE` 中），否则回 `ERR noent` |
-| `reboot_all` | 重置整个堆，按 `SCHEDULE` 重新装载全部任务。**增删任务用这个** |
+| `reboot <名字>` | **只重启这一个任务**，别的任务完全不受影响（指针都不动）。名字必须正在跑，否则回 `ERR noent` |
+| `reboot_all` | 重置整个堆，按 `SCHEDULE` 重新装载全部任务。**改 SCHEDULE 后用这个** |
+| `tasks` | 列出当前存活任务与它们的 ID（ID 就是任务槽号 0..7） |
+| `start <名字>` | 手动启用一个任务：从文件系统读该程序，装进**第一个空闲槽位**并开始跑 |
+| `kill <名字>` | 杀掉**所有**这个名字的任务（同名可能不止一个） |
+| `killid <ID>` | 按槽位号杀（只杀一个，用 `tasks` 查 ID） |
 
 `reboot <名字>` 走的是 `ReArrangeMemAndTask()`：把该任务占的内存块整条释放
 （相邻空块照样合并）、槽位清零，然后**先把新程序读进缓冲区**、读成功才动手，
@@ -476,7 +506,29 @@ LEDSTREAM
 `reboot_all` 则是 `init_mem_info()`（真正的整堆重置）+ `arssched_load()`。
 离线测试里反复 `reboot` 50 次来盯"单任务释放是否干净"这一点。
 
-> 字节码通过 ABI 写文件**不会**触发任何重启，只有终端的 `reboot` 命令会。
+`start` / `kill` 是**和 `SCHEDULE` 文件解耦**的一对，玩的是"现在谁在跑"：
+
+- `start LEDSTREAM` → 装进第一个空槽位（可能不是它上次的 ID），回 `OK`；
+  文件不存在回 `ERR noent`，已经在跑回 `ERR busy`，8 个槽位占满回 `ERR full`。
+- `kill LEDSTREAM` → **所有**叫 LEDSTREAM 的任务一起杀（8 个槽位全扫一遍），
+  释放它们占的内存、清空槽位、名字也清掉，回 `OK`；一个都没杀到回 `ERR noent`。
+  `killid 1` 则只杀 1 号槽位那一个。
+- **同名任务是可能的**：`start` 会拒绝重复启动（`ERR busy`），但 `SCHEDULE` 里同一个
+  文件名写两行就会装出两个同名任务，之后 `reboot_all` 也会照样装两个。所以 `kill`
+  是按名字"全杀"，要精确杀某一个就用 `tasks` 查出 ID 再 `killid`。
+- **只杀运行中的实例**：文件还在，`SCHEDULE` 也没改。
+  所以 `kill X` 之后来个 `reboot_all`，X 会按 `SCHEDULE` 又被装回来。
+  要"永久移除"，就改 `SCHEDULE`（或 `del` 掉文件）再 `reboot_all`。
+
+```
+tasks
+  TASKS 2
+  0 LEDFLASH
+  1 LEDSTREAM
+  OK
+```
+
+> 字节码通过 ABI 写文件**不会**触发任何重启，只有终端的 reboot/start/kill 命令会。
 
 ---
 
@@ -493,8 +545,12 @@ LEDSTREAM
 | `del <dest_name>` | 删除文件 |
 | `ls` | 列出所有文件名 |
 | `occ [text]` | 可视化 FLASH 占用：加 `text` 输出纯文本，否则红=占用 / 绿=空闲 |
-| `ver` | 查询固件元数据版本、已装载任务数 |
-| `reboot <name>` | 只重启调度计划里的那一个任务（上传完新程序后用这个） |
+| `ver` | 查询固件元数据版本、当前存活任务数 |
+| `tasks` | 列出存活任务与它们的 ID |
+| `start <name>` | 手动启用一个任务（装进第一个空闲槽位，不改 `SCHEDULE`） |
+| `kill <name>` | 杀掉正在跑的那个任务（只杀实例） |
+| `killid <ID>` | 按任务 ID 杀 |
+| `reboot <name>` | 只重启正在跑的那一个任务（上传完新程序后用这个） |
 | `reboot_all` | 重置整个堆并按 `SCHEDULE` 重新装载全部任务 |
 | `format` | **恢复出厂设置**：清空、铺回出厂示例、并立刻重启任务（终端里会二次确认） |
 | `help` / `quit` | 帮助 / 退出 |
@@ -506,13 +562,16 @@ LEDSTREAM
 > 之所以这样放宽，是因为手敲终端时全大写、大小写混排都很自然——
 > 但设备原来那份严格比较会直接回 `ERR unknown`，让人以为命令不存在。
 
-出错时的三种应答要分清：
+出错时的几种应答要分清：
 
 | 应答 | 含义 |
 |---|---|
 | `ERR unknown` | 命令词不认识 |
-| `ERR noent` | 命令对了，但那个名字不在调度计划里（或文件不存在） |
-| `ERR args` | 命令对了但参数不够（比如 `reboot` 没给名字） |
+| `ERR noent` | 命令对了，但那个名字不存在（文件没有 / 任务没在跑） |
+| `ERR args` | 命令对了但参数不够（比如 `reboot` 没给名字、`killid` 没给数字） |
+| `ERR busy` | `start` 的那个任务已经在跑了 |
+| `ERR full` | `start` 时 8 个任务槽位全占着 |
+| `ERR write` | 上传的数据落盘失败（文件系统满 / 底层出错） |
 
 ### 行协议（便于自己写客户端）
 
@@ -524,7 +583,11 @@ LEDSTREAM
 | `get <name>` | `DATA <len>` → 每 32 字节一行的十六进制 → 空行 → `OK`；不存在回 `ERR noent` |
 | `del <name>` | `OK` / `ERR noent` |
 | `ls` | `LS` → 逐行文件名 → `OK` |
-| `reboot <name>` | `OK` / `ERR noent`（名字不在调度计划里）/ `ERR args`（没给名字） |
+| `tasks` | `TASKS <存活数>` → 每行 `<ID> <名字>` → `OK` |
+| `start <name>` | `OK` / `ERR noent`（文件不存在）/ `ERR busy`（已经在跑）/ `ERR full`（槽位满）/ `ERR args` |
+| `kill <name>` | `OK`（杀掉一个或多个同名任务）/ `ERR noent`（一个都没在跑）/ `ERR args` |
+| `killid <ID>` | `OK` / `ERR noent`（槽位空或 ID 越界）/ `ERR args`（没给数字） |
+| `reboot <name>` | `OK` / `ERR noent`（没在跑）/ `ERR args`（没给名字） |
 | `reboot_all` | `OK` |
 | `format` | `OK`（会花约 1 秒：清空 + 铺回出厂示例 + 重启任务）/ `ERR format` |
 | `occ` | `USED <n> FREE <m>` → 128 页的页图（每行 8 页）→ `FCB:` → 32 行目录项 → `OK` |
@@ -783,28 +846,28 @@ abi_invoke 0     ; digitalWrite(6, 1)
 
 ```
 main
-	mem
-		$sensor I 0
-		$val I 0
-	end_mem
-	mov I $sensor 13
-	mov I $val 0
-	lb loop
-		pushp I $sensor
-		abi_invoke 1        ; digitalRead(13) -> CalcResu
-		push I $val
-		eq I $val 1
-		jmp_t led_on
-		pushp I 6           ; 灭
-		pushp I 0
-		abi_invoke 0
-		jmp loop
-		lb led_on
-			pushp I 6       ; 亮
-			pushp I 1
-			abi_invoke 0
-	jmp loop
-	hlt
+  mem
+    $sensor I 0
+    $val I 0
+  end_mem
+  mov I $sensor 13
+  mov I $val 0
+  lb loop
+    pushp I $sensor
+    abi_invoke 1        ; digitalRead(13) -> CalcResu
+    push I $val
+    eq I $val 1
+    jmp_t led_on
+    pushp I 6           ; 灭
+    pushp I 0
+    abi_invoke 0
+    jmp loop
+    lb led_on
+      pushp I 6       ; 亮
+      pushp I 1
+      abi_invoke 0
+  jmp loop
+  hlt
 endmain
 ```
 
@@ -812,62 +875,62 @@ endmain
 
 ```
 fn delay_ms
-	mem
-		$len I 0
-		$now I 0
-		$start I 0
-		$mid I 0
-	end_mem
-	;2号ABI为系统时钟
-	abi_invoke 2
-	push I $start
-	lb loop
-		abi_invoke 2
-		push I $now
-		sub I $now $start
-		push I $mid
-		ge I $mid $len
-		jmp_t finish
-	jmp loop
-	lb finish
-		ret
+  mem
+    $len I 0
+    $now I 0
+    $start I 0
+    $mid I 0
+  end_mem
+  ;2号ABI为系统时钟
+  abi_invoke 2
+  push I $start
+  lb loop
+    abi_invoke 2
+    push I $now
+    sub I $now $start
+    push I $mid
+    ge I $mid $len
+    jmp_t finish
+  jmp loop
+  lb finish
+    ret
 endfn
 
 main
-	mem
-		$delay I 0
-		$count I 0
-		$ele I 0
-		$array I 2
-	end_mem
-	mov I $delay 100
-	mov I $count 0
-	;三个LED分别接在18、19、20号引脚上
-	init_array I $array 3 18 19 20
-	lb loop_main
-		;依次点亮当前LED
-		read_array I $array $count
-		push I $ele
-		pushp I $ele
-		pushp I 1
-		;0号ABI为digitalWrite
-		abi_invoke 0
-		pushp I $delay
-		call delay_ms
-		pushp I $ele
-		pushp I 0
-		abi_invoke 0
-		;切换到下一个LED，越界则回到第一个
-		add I $count 1
-		push I $count
-		gt I $count 2
-		jmp_t clean
-	jmp loop_main
-	lb clean
-		mov I $count 0
-	jmp loop_main
-	hlt
-	endmain
+  mem
+    $delay I 0
+    $count I 0
+    $ele I 0
+    $array I 2
+  end_mem
+  mov I $delay 100
+  mov I $count 0
+  ;三个LED分别接在18、19、20号引脚上
+  init_array I $array 3 18 19 20
+  lb loop_main
+    ;依次点亮当前LED
+    read_array I $array $count
+    push I $ele
+    pushp I $ele
+    pushp I 1
+    ;0号ABI为digitalWrite
+    abi_invoke 0
+    pushp I $delay
+    call delay_ms
+    pushp I $ele
+    pushp I 0
+    abi_invoke 0
+    ;切换到下一个LED，越界则回到第一个
+    add I $count 1
+    push I $count
+    gt I $count 2
+    jmp_t clean
+  jmp loop_main
+  lb clean
+    mov I $count 0
+  jmp loop_main
+  hlt
+  endmain
 ```
 
 更多样例见 `Compiler/Demo/` 目录。
