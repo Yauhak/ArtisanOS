@@ -13,7 +13,7 @@ extern "C" {
 #endif
 
 ars_i8 arssched_load(void);   /* 读取 SCHEDULE 并装载各任务，返回装入的任务数 */
-void   arssched_loop(void);   /* 轮转执行一条指令（等价于原来 loop() 的一轮） */
+void   arssched_loop(void);   /* 轮转执行一条指令 */
 extern uars_i8 gSchedTasks;   /* 当前存活任务数，供诊断查询 */
 
 /* 重启：
@@ -25,7 +25,7 @@ ars_i8 arssched_rebootAll(void);
 
 /* 手动起停（与 SCHEDULE 文件解耦，只影响"现在谁在跑"）：
  *   arssched_start(名字)  从文件系统读一个程序，装进第一个空闲槽位并开始跑
- *   arssched_kill(名字)   杀掉**所有**这个名字的任务（同名可能不止一个）
+ *   arssched_kill(名字)   杀掉所有这个名字的任务（同名可能不止一个）
  *   arssched_killId(ID)   按槽位号杀（只杀一个）
  *   arssched_alive(ID)    该槽位是否有活任务（1/0）
  *   arssched_name(ID)     该槽位跑的程序名（空串表示没有）
