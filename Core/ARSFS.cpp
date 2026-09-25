@@ -19,7 +19,7 @@ static volatile uars_i8 fsLock = 0;
 static void pgFreeChain(int start);
 static ars_i8 writeFileAt(int idx, const uars_i8 *src, long len);
 
-static void namePack(ars_i8 *dst, const char *src) {
+void namePack(ars_i8 *dst, const char *src) {
 	int i = 0;
 	for (; i < NAME_LEN && src[i]; i++) dst[i] = src[i];
 	for (; i < NAME_LEN; i++) dst[i] = ' ';

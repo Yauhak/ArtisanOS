@@ -1,6 +1,8 @@
 #include "INTERPRETER.h"
 #include "Memory.h"
 #include "ByteCode.h"
+#include "ARSUART.h"
+#include "ARSCMD.h"
 
 extern ars_i32 CalcResu[OS_MAX_TASK];
 extern int needJump[OS_MAX_TASK];
@@ -95,6 +97,8 @@ static void deferredBoot(void) {
 void setup() {
 #if USE_FILE_AND_UART
   arsuart_begin(115200);
+  arscmd_begin();
+  arsuart_setLineHandler(arscmd_line);  //把命令层挂到串口层上：两个模块互不认识
 #else
   //Serial.begin(115200);
   delay(1000);
@@ -108,7 +112,7 @@ void loop() {
 #if USE_FILE_AND_UART
   deferredBoot();
   arssched_loop();  //轮转执行一条指令
-  arsuart_poll();   //处理串口命令（非阻塞）
+  arsuart_poll();   //串口层：推发送缓冲 + 拼行交给命令层（全程非阻塞）
 #else
   execOne();
 #endif

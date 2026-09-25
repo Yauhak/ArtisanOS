@@ -86,6 +86,7 @@ typedef struct FCB {
 extern "C" {
 #endif
 
+void namePack(ars_i8 *dst, const char *src);
 ars_i8 format(void);          /* 擦除并重建元数据区 */
 ars_i8 arsfs_init(void);      /* 挂载；未格式化或版本不符则自动格式化 */
 uars_i32 arsfsBindBase(void); /* 按实际 FLASH 容量算出文件系统基地址（内部调用） */

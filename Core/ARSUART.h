@@ -3,18 +3,25 @@
 
 #include "IO_INCLUDE.h"
 
-/* 串口命令处理：
- *   文本命令以 '\n' 结尾；二进制数据由 "update" 命令声明长度后按块传输。
- *   应答行一律以 "OK"/"ERR"/"RDY"/"DATA" 开头，便于终端解析。
- */
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+typedef void (*ArsLineFn)(char *line);
+
 void arsuart_begin(uars_i32 baud);
-void arsuart_poll(void);      /* 每轮调度调用一次，非阻塞 */
-void arsuart_tick(void);      /* 兼容别名 */
-void arsuart_txBegin(void);   /* 开始一条应答：作废上一条没人要的积压 */
+void arsuart_setLineHandler(ArsLineFn fn);
+void arsuart_poll(void); /* 推发送缓冲 + 收行 */
+void arsuart_tick(void); 
+void arsuart_txBegin(void); 
+void arsuart_putc(char c);
+void arsuart_puts(const char *s);
+void arsuart_putu32(uars_i32 v); 
+void arsuart_putLine(const char *s);
+void arsuart_txDrain(void);
+int arsuart_rxAvail(void); 
+int arsuart_rxGet(void);
+void arsuart_rxFlush(void);
 
 #ifdef __cplusplus
 }

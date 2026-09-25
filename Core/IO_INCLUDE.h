@@ -70,6 +70,7 @@ void ARS_provision(void);
 
 #include "ARSFS.h"
 #include "ARSSCHED.h"
-#include "ARSUART.h"
+#include "ARSUART.h" /* 串口传输层 */
+#include "ARSCMD.h"  /* 命令层（只依赖 ARSUART / ARSFS / ARSSCHED） */
 
 #endif /* IO_INCLUDE */
